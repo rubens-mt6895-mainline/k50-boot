@@ -1,0 +1,427 @@
+name: build-kernel
+
+# ============================================================
+#  K50（rubens / MT6895）内核 CI
+#  用法见 README.md：fork → 准备 base/boot.img（或 base_url）→ 跑这个 workflow
+# ============================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      pack_boot:
+        description: "是否打包可直刷 boot.img（需要 base/boot.img 或 base_url）"
+        required: true
+        type: choice
+        options: ["auto", "yes", "no"]
+        default: "auto"
+      base_url:
+        description: "可选：你自己的 boot_a 基线镜像直链（不填则用仓库里的 base/boot.img）"
+        required: false
+        type: string
+        default: ""
+      kernel_ref:
+        description: "可选：覆盖内核分支/commit（不填用 config/config 里的 kernel_ref）"
+        required: false
+        type: string
+        default: ""
+      config_source:
+        description: "内核配置来源"
+        required: true
+        type: choice
+        options: ["auto", "repo", "stock"]
+        default: "auto"
+      publish_release:
+        description: "是否发布 GitHub Release"
+        required: true
+        type: choice
+        options: ["yes", "no"]
+        default: "yes"
+      tag_suffix:
+        description: "可选：Release tag 后缀，例如 -test1"
+        required: false
+        type: string
+        default: ""
+      runner:
+        description: "跑在哪个 runner 上（x86 交叉编译够用；有 arm64 机器可以换成 ubuntu-24.04-arm 更快）"
+        required: false
+        type: choice
+        options:
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
+        default: "ubuntu-24.04"
+  push:
+    branches: [main, master]
+    paths:
+      - "config/**"
+      - "patches/**"
+      - "scripts/**"
+      - "kernel-modules/**"
+      - ".github/workflows/build-kernel.yml"
+  schedule:
+    # 每周一 02:17（北京时间）跟一次上游分支
+    - cron: "17 18 * * 0"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-kernel-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ARCH: arm64
+  KERNEL_DIR: kernel
+  # 刻意不用 O=<outdir> 外部构建目录：厂商 Kbuild 里 -I$(srctree)/$(src) 会在 O= 下
+  # 展开成重复前缀导致编译失败，详见「编译内核」步骤的注释与 README 的 FAQ。
+  DTB: mediatek/mt6895-xiaomi-rubens.dtb
+
+jobs:
+  build:
+    # x86 交叉编译（LLVM=1）就够；想更快可以在 Run workflow 里把 runner 换成 ubuntu-24.04-arm。
+    runs-on: ${{ github.event.inputs.runner || 'ubuntu-24.04' }}
+    timeout-minutes: 330
+
+    steps:
+      - name: 取仓库
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: 读取 config/config
+        id: cfg
+        run: |
+          set -euo pipefail
+          get() { sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" config/config | head -n1 | tr -d '\r' | sed 's/[[:space:]]*$//'; }
+          KREPO="$(get kernel_repo)"
+          KREF="$(get kernel_ref)"
+          LV="$(get localversion)"
+          MODS="$(get modules)"
+          OPT="$(get optional_patches)"
+          PB="$(get pack_boot)"
+          KEEP="$(get keep_releases)"
+          SRC="$(get config_source)"
+          TRIM="$(get trim_debug_info)"
+          : "${TRIM:=true}"
+          [ -n "$KREPO" ] || { echo "::error::config/config 缺 kernel_repo"; exit 1; }
+          [ -n "$KREF" ]  || { echo "::error::config/config 缺 kernel_ref";  exit 1; }
+          # workflow_dispatch 的输入优先（push / schedule 时这些为空）
+          if [ -n "${{ inputs.kernel_ref }}" ];    then KREF="${{ inputs.kernel_ref }}"; fi
+          if [ -n "${{ inputs.config_source }}" ]; then SRC="${{ inputs.config_source }}"; fi
+          if [ -n "${{ inputs.pack_boot }}" ];     then PB="${{ inputs.pack_boot }}"; fi
+          : "${KEEP:=10}"
+          {
+            echo "kernel_repo=$KREPO"
+            echo "kernel_ref=$KREF"
+            echo "localversion=$LV"
+            echo "modules=$MODS"
+            echo "optional_patches=$OPT"
+            echo "pack_boot=$PB"
+            echo "keep_releases=$KEEP"
+            echo "config_source=$SRC"
+            echo "trim_debug_info=$TRIM"
+          } >> "$GITHUB_OUTPUT"
+          echo "源码   : $KREPO @ $KREF"
+          echo "版本   : localversion='$LV'"
+          echo "模块   : '$MODS'"
+          echo "配置   : $SRC"
+          echo "打包   : $PB（保留 $KEEP 个 Release）"
+
+      - name: 腾磁盘
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost || true
+          df -h / | tail -1
+
+      - name: 装工具链
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bc bison flex libelf-dev libssl-dev cpio rsync \
+                                   zstd xz-utils clang-18 lld-18 llvm-18 ccache python3
+          echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
+          export PATH="/usr/lib/llvm-18/bin:$PATH"
+          clang --version | head -1
+          ld.lld --version | head -1
+          ccache --version | head -1
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: k50-${{ steps.cfg.outputs.kernel_ref }}
+          max-size: 4G
+
+      - name: 拉内核源码
+        run: |
+          set -euo pipefail
+          # 用 fetch 而不是 clone --branch：branch 名和 commit SHA 都能用
+          mkdir -p "$KERNEL_DIR"
+          git -C "$KERNEL_DIR" init -q
+          git -C "$KERNEL_DIR" remote add origin "${{ steps.cfg.outputs.kernel_repo }}"
+          git -C "$KERNEL_DIR" fetch -q --depth 1 origin "${{ steps.cfg.outputs.kernel_ref }}"
+          git -C "$KERNEL_DIR" checkout -q FETCH_HEAD
+          git -C "$KERNEL_DIR" log -1 --format='提交 %H%n日期 %ad%n标题 %s'
+          echo "COMMIT=$(git -C "$KERNEL_DIR" rev-parse HEAD)" >> "$GITHUB_ENV"
+          du -sh "$KERNEL_DIR"
+
+      - name: 打补丁
+        id: patch
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          applied=0
+          skipped=0
+          for p in "$PWD"/patches/[0-9]*.patch; do
+            # 已经在树里就跳过（这样上游合了以后也不会炸）
+            if git -C "$KERNEL_DIR" apply --reverse --check "$p" >/dev/null 2>&1; then
+              echo "== 已存在，跳过：$(basename "$p")"
+              skipped=$((skipped+1))
+              continue
+            fi
+            echo "== 应用：$(basename "$p")"
+            git -C "$KERNEL_DIR" apply --index "$p"
+            applied=$((applied+1))
+          done
+          if [ "${{ steps.cfg.outputs.optional_patches }}" = "true" ]; then
+            for p in "$PWD"/patches/optional/[0-9]*.patch; do
+              if git -C "$KERNEL_DIR" apply --reverse --check "$p" >/dev/null 2>&1; then
+                echo "== 已存在，跳过：$(basename "$p")"; continue
+              fi
+              echo "== 应用（可选）：$(basename "$p")"
+              git -C "$KERNEL_DIR" apply --index "$p"
+              applied=$((applied+1))
+            done
+          fi
+          echo "新应用 $applied 个，跳过 $skipped 个"
+
+      - name: 生成内核配置
+        run: |
+          set -euo pipefail
+          SRC="${{ steps.cfg.outputs.config_source }}"
+          KDIR="$PWD/$KERNEL_DIR"
+          if [ "$SRC" = "stock" ] || { [ "$SRC" = "auto" ] && [ -f config/stock_defconfig ]; }; then
+            [ -f config/stock_defconfig ] || { echo "::error::config_source=stock，但 config/stock_defconfig 不存在"; exit 1; }
+            install -m644 config/stock_defconfig "$KDIR/arch/arm64/configs/k50-stock_defconfig"
+            make -C "$KDIR" ARCH=arm64 LLVM=1 k50-stock_defconfig
+            echo "配置来源：config/stock_defconfig（你自己的设备配置）"
+          else
+            make -C "$KDIR" ARCH=arm64 LLVM=1 k50-rubens_defconfig
+            echo "配置来源：仓库自带 k50-rubens_defconfig"
+          fi
+          make -C "$KDIR" ARCH=arm64 LLVM=1 olddefconfig
+          # 可选：仓库里的 config/extra.config 片段（例如给镜像模式开
+          # CONFIG_SQUASHFS_ZSTD=y），在 defconfig 之后合并进来
+          if [ -f config/extra.config ]; then
+            "$KDIR/scripts/kconfig/merge_config.sh" -m -O "$KDIR" \
+              "$KDIR/.config" config/extra.config >/dev/null
+            make -C "$KDIR" ARCH=arm64 LLVM=1 olddefconfig
+            echo "已合并 config/extra.config："
+            sed 's/^/    /' config/extra.config
+          fi
+          # 可选：关掉调试信息（vmlinux 从 569MB 降到 71MB、编得快）
+          # **但这会让 boot.img 打不出来**：实测关掉后 Image 内容有 24,251,244 字节不同，
+          # gzip(-9) 从 19,932,644 涨到 20,097,258（+164,614），而厂商内核段上限只有
+          # 19,945,390 → 打包会因「塞不进原内核段」而失败。所以 config/config 里默认 false。
+          # 注意：CONFIG_DEBUG_INFO 是「无 prompt 的 bool」，由 "Debug information" 这个
+          # choice 的成员 select 出来。只 -d DEBUG_INFO 是没用的 —— olddefconfig 会把
+          # 还生效的 choice 成员（DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT）重新 select 回来，
+          # .config 里 DEBUG_INFO 又变 y（本地实测：这就是「说了关了其实没关」）。
+          # 正确做法：把 choice 成员全关、只留 DEBUG_INFO_NONE，并断言真的生效。
+          if [ "${{ steps.cfg.outputs.trim_debug_info }}" = "true" ]; then
+            "$KDIR/scripts/config" --file "$KDIR/.config" \
+              -e DEBUG_INFO_NONE \
+              -d DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT \
+              -d DEBUG_INFO_DWARF4 -d DEBUG_INFO_DWARF5 \
+              -d DEBUG_INFO_BTF
+            make -C "$KDIR" ARCH=arm64 LLVM=1 olddefconfig
+            if grep -q '^CONFIG_DEBUG_INFO=y' "$KDIR/.config"; then
+              echo "::error::trim_debug_info 未生效：.config 里 CONFIG_DEBUG_INFO 仍是 y"
+              exit 1
+            fi
+            echo "已关闭 DEBUG_INFO（注意：这样编出来的 Image gzip 后更大，boot.img 会打包失败）"
+          fi
+          echo "--- 关键项 ---"
+          grep -E "^CONFIG_(MODULES|BT_HIDP|UHID|DRM_PANEL_L11A_38_0A_0A_DSC_CMD|TOUCHSCREEN_ST_FTS_V521_SPI_L11A|SQUASHFS|SQUASHFS_ZSTD|SQUASHFS_XZ|OVERLAY_FS|BLK_DEV_LOOP)=" "$KDIR/.config" || true
+
+      - name: 编译内核
+        run: |
+          set -euo pipefail
+          # 为什么不用 O=<outdir>：drivers/misc/mediatek/btif/common/Makefile 里写的是
+          #     ccflags-y += -I$(srctree)/$(src)/inc
+          # 而 Kbuild 的 $(src) 本身就带 srctree 前缀；O= 构建时 srctree 是相对路径 ..，
+          # 展开成 -I../../drivers/...（多退了一级），于是 mtk_btif.c / btif_dma_plat.c
+          # 找不到 btif_pub.h 等头文件，整树编译 exit 2。树内构建（= 真机内核的构建方式）
+          # 下 srctree=. 没有这个问题，所以这里坚持树内构建。
+          KDIR="$PWD/$KERNEL_DIR"
+          LV="${{ steps.cfg.outputs.localversion }}"
+          time make -C "$KDIR" ARCH=arm64 LLVM=1 -j"$(nproc)" \
+               CC="ccache clang" LOCALVERSION="$LV" Image
+          # dtb 单独一次调用：与 Image 放同一次并行调用时偶发两个子 make 抢 .config
+          #（报 make[6]: *** [Makefile:892: .config] Error 1）
+          make -C "$KDIR" ARCH=arm64 LLVM=1 -j"$(nproc)" "$DTB"
+          KREL="$(make -s -C "$KDIR" ARCH=arm64 LLVM=1 LOCALVERSION="$LV" kernelrelease)"
+          echo "KREL=$KREL" >> "$GITHUB_ENV"
+          echo "内核版本：$KREL"
+          ccache --show-stats | head -12
+
+      - name: 编译外部模块
+        if: steps.cfg.outputs.modules != ''
+        run: |
+          set -euo pipefail
+          KDIR="$PWD/$KERNEL_DIR"
+          # 外部模块的 modpost 要 Module.symvers；只编 Image（不编 modules）时这个文件不存在
+          [ -f "$KDIR/Module.symvers" ] || cp "$KDIR/vmlinux.symvers" "$KDIR/Module.symvers"
+          LV="${{ steps.cfg.outputs.localversion }}"
+          # 必须 modules_prepare：只编 Image 不会生成 scripts/module.lds，外部模块链接时
+          # 会报 "No rule to make target 'xxx.ko', needed by '__modfinal'" 直接失败。
+          # LOCALVERSION 必须与编 Image 时一致，否则 utsrelease.h 被改写成另一个版本号，
+          # 模块 vermagic 与内核不一致 —— 刷进去 insmod 会报 Invalid module format。
+          make -C "$KDIR" ARCH=arm64 LLVM=1 LOCALVERSION="$LV" modules_prepare
+          mkdir -p dist
+          IFS=', ' read -ra MODS <<< "${{ steps.cfg.outputs.modules }}"
+          for m in "${MODS[@]}"; do
+            [ -n "$m" ] || continue
+            [ -d "kernel-modules/$m" ] || { echo "::error::kernel-modules/$m 不存在"; exit 1; }
+            echo "== 编译模块：$m"
+            make -C "$KDIR" M="$PWD/kernel-modules/$m" ARCH=arm64 LLVM=1 \
+                 CC="ccache clang" -j"$(nproc)" LOCALVERSION="$LV" modules
+            cp "kernel-modules/$m/"*.ko dist/
+          done
+          ls -l dist/*.ko
+          # 核对 vermagic：模块与内核必须同版本，否则刷进设备装了也白装
+          KMAGIC="$(cat "$KDIR/include/config/kernel.release")"
+          echo "内核版本：$KMAGIC"
+          for ko in dist/*.ko; do
+            mver="$(modinfo -F vermagic "$ko" 2>/dev/null | awk '{print $1}')"
+            if [ -z "$mver" ]; then
+              mver="$(grep -ao 'vermagic=[^[:cntrl:]]*' "$ko" | head -1 | cut -d= -f2 | awk '{print $1}')"
+            fi
+            if [ "$mver" != "$KMAGIC" ]; then
+              echo "::error::$(basename "$ko") vermagic=$mver 与内核 $KMAGIC 不一致"
+              exit 1
+            fi
+            echo "  OK $(basename "$ko") vermagic=$mver"
+          done
+
+      - name: 组装产物
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp "$KERNEL_DIR/arch/arm64/boot/Image" dist/Image
+          gzip -9 -n -c dist/Image > dist/Image.gz
+          cp "$KERNEL_DIR/arch/arm64/boot/dts/$DTB" "dist/$(basename "$DTB")"
+          cp "$KERNEL_DIR/.config" dist/kernel.config
+          # 仓库自带的 defconfig 由补丁 0003 带进内核树，这里从内核树取（仓库里没有这份文件）
+          cp "$KERNEL_DIR/arch/arm64/configs/k50-rubens_defconfig" dist/ 2>/dev/null || true
+          if [ -f config/stock_defconfig ]; then cp config/stock_defconfig dist/; fi
+          cp scripts/k50-pack-boot.py dist/
+          {
+            echo "K50 (rubens / MT6895) kernel — CI build"
+            echo "构建时间(UTC) : $(date -u '+%Y-%m-%d %H:%M:%S')"
+            echo "运行器        : ${{ runner.os }} / ${{ runner.arch }}"
+            echo "内核版本      : ${KREL}"
+            echo "源码          : ${{ steps.cfg.outputs.kernel_repo }}"
+            echo "源码 ref      : ${{ steps.cfg.outputs.kernel_ref }}"
+            echo "源码提交      : ${COMMIT}"
+            echo "localversion  : '${{ steps.cfg.outputs.localversion }}'"
+            echo "工具链        : $(clang --version | head -1)"
+            echo "补丁          : $(ls patches/*.patch 2>/dev/null | xargs -r -n1 basename | paste -sd' ' || echo -)"
+            if [ "${{ steps.cfg.outputs.optional_patches }}" = "true" ]; then echo "可选补丁      : 已应用"; fi
+            echo "外部模块      : '${{ steps.cfg.outputs.modules }}'"
+            echo
+            echo "Image    : $(stat -c%s dist/Image) 字节"
+            echo "Image sha: $(sha256sum dist/Image | cut -d' ' -f1)"
+            echo "Image.gz : $(stat -c%s dist/Image.gz) 字节"
+            echo
+            echo "注意：vermagic 变了，设备 /root 下现成的 .ko 需要重编才能 insmod。"
+          } > dist/BUILD.txt
+
+      - name: 打包 boot.img
+        if: steps.cfg.outputs.pack_boot != 'no'
+        run: |
+          set -euo pipefail
+          mkdir -p base
+          BASE="base/boot.img"
+          if [ -n "${{ inputs.base_url }}" ] && [ ! -f "$BASE" ]; then
+            echo "下载基线镜像：${{ inputs.base_url }}"
+            curl -fL --retry 3 --retry-delay 2 -o "$BASE" "${{ inputs.base_url }}"
+          fi
+          if [ ! -f "$BASE" ]; then
+            if [ "${{ steps.cfg.outputs.pack_boot }}" = "yes" ]; then
+              echo "::error::pack_boot=yes，但既没有 base/boot.img 也没给 base_url"; exit 1
+            fi
+            echo "::notice::没有基线镜像 → 跳过 boot.img 打包，只出内核产物"
+            exit 0
+          fi
+          ls -l "$BASE"
+          head -c8 "$BASE" | grep -q 'ANDROID!' || { echo "::error::基线不是 MTK boot image（magic 不是 ANDROID!）"; exit 1; }
+          BASESHA="$(sha256sum "$BASE" | cut -d' ' -f1)"
+          echo "BASESHA=$BASESHA" >> "$GITHUB_ENV"
+          if python3 scripts/k50-pack-boot.py --base "$BASE" --image dist/Image --out dist/boot.img; then
+            MODE="Option B（只换内核段；头部与 ramdisk 逐字节不动）"
+          else
+            echo "::warning::新内核塞不进原内核段 → 改用 --allow-shift，ramdisk 会整体后移，这条路径没在真机验证过"
+            python3 scripts/k50-pack-boot.py --base "$BASE" --image dist/Image --out dist/boot.img --allow-shift
+            MODE="Option B + shift（ramdisk 已后移，风险自负）"
+          fi
+          {
+            echo
+            echo "boot.img   : $(stat -c%s dist/boot.img) 字节"
+            echo "boot sha   : $(sha256sum dist/boot.img | cut -d' ' -f1)"
+            echo "基线镜像   : ${BASESHA}"
+            echo "打包方式   : ${MODE}"
+            echo
+            echo "刷入（先备份！）："
+            echo "  fastboot flash boot_a boot.img"
+            echo "  或设备上：dd if=/dev/sdc43 of=/root/boot_before.img bs=1M && dd if=boot.img of=/dev/sdc43 bs=1M"
+          } >> dist/BUILD.txt
+
+      - name: 校验和
+        run: |
+          set -euo pipefail
+          cd dist
+          rm -f SHA256SUMS.txt
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          echo
+          cat BUILD.txt
+
+      - name: 上传 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: k50-kernel-${{ github.run_number }}
+          path: dist/*
+          retention-days: 14
+
+      - name: 发布 Release
+        if: ${{ inputs.publish_release != 'no' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ci-${{ github.run_number }}-${{ github.run_attempt }}${{ inputs.tag_suffix }}
+          name: "CI ${{ env.KREL }} (${{ github.run_number }})"
+          prerelease: true
+          make_latest: false
+          body: |
+            K50（rubens / MT6895）CI 内核构建
+
+            - 内核版本：`${{ env.KREL }}`
+            - 源码提交：`${{ env.COMMIT }}`
+            - 触发：${{ github.event_name }}
+            - 详细说明见资产里的 `BUILD.txt`
+
+            刷机前先备份 boot_a；`boot.img` 只在提供了基线镜像时才会出现。
+          files: dist/*
+
+      - name: 清理旧 Release
+        if: ${{ inputs.publish_release != 'no' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          KEEP: ${{ steps.cfg.outputs.keep_releases }}
+        run: |
+          set -euo pipefail
+          gh release list --limit 100 --json tagName,createdAt \
+            --jq '[.[] | select(.tagName | startswith("ci-"))] | sort_by(.createdAt) | reverse | .[].tagName' > /tmp/tags.txt || true
+          echo "现有 ci-* Release："; cat /tmp/tags.txt || true
+          tail -n +$((KEEP+1)) /tmp/tags.txt | while read -r t; do
+            [ -n "$t" ] || continue
+            echo "删除旧 Release：$t"
+            gh release delete "$t" --yes --cleanup-tag || true
+          done

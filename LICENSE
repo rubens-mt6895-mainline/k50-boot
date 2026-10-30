@@ -1,0 +1,10 @@
+本仓库包含两类内容，许可分别如下：
+
+1. 内核补丁 `patches/**`、内核模块 `kernel-modules/k50-bl/**
+   遵循 GNU General Public License v2.0（与上游 Linux 内核一致）。
+   完整文本见 https://www.gnu.org/licenses/old-licenses/gpl-2.0.txt
+
+2. 其余脚本与文档 `scripts/**`、`config/**`、`*.md`、工作流
+   以 MIT 许可发布（可自由使用、修改、再分发，保留版权声明）。
+
+本仓库不含任何厂商二进制（boot 镜像基线由使用者自行提供，见 base/README.md）。

@@ -1,0 +1,17 @@
+# 设备基线镜像：含厂商 ramdisk，默认不提交（见 base/README.md）
+base/*.img
+base/*.bin
+
+# 构建产物
+build/
+dist/
+kernel/
+out/
+*.o
+*.ko
+*.cmd
+*.tmp
+
+# python
+__pycache__/
+*.pyc
