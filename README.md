@@ -1,4 +1,4 @@
-# k50-boot — Redmi K50（rubens / MT6895）mainline 内核与 boot 镜像
+# k50-boot
 
 [![build-kernel](https://github.com/rubens-mt6895-mainline/k50-boot/actions/workflows/build-kernel.yml/badge.svg)](https://github.com/rubens-mt6895-mainline/k50-boot/actions/workflows/build-kernel.yml)
 [![release](https://img.shields.io/github/v/release/rubens-mt6895-mainline/k50-boot?include_prereleases)](https://github.com/rubens-mt6895-mainline/k50-boot/releases)
