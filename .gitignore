@@ -1,6 +1,8 @@
 # 设备基线镜像：含厂商 ramdisk，默认不提交（见 base/README.md）
 base/*.img
 base/*.bin
+# 仓库自带的基线镜像跟着仓库走（见 base/README.md）
+!base/boot.img
 
 # 构建产物
 build/

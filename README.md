@@ -19,7 +19,7 @@ rootfs（Debian 13 + GNOME）在 [k50-rootfs](https://github.com/rubens-mt6895-m
 
 | 文件 | 是什么 |
 |---|---|
-| `boot.img` | 可以直接刷的 boot 镜像（**只有构建时给了基线镜像才会出现**） |
+| `boot.img` | 可以直接刷的 boot 镜像（用仓库自带的 `base/boot.img` 打，见下） |
 | `Image` / `Image.gz` | 未压缩 / 压缩的内核 |
 | `mt6895-xiaomi-rubens.dtb` | 设备树 |
 | `kernel.config` | 这次实际用的内核配置 |
@@ -34,11 +34,8 @@ rootfs（Debian 13 + GNOME）在 [k50-rootfs](https://github.com/rubens-mt6895-m
 
 **① fork** 到您的账号。
 
-**② 准备基线镜像**，二选一：
-
-- 把自己设备的 `boot_a` dump 出来，放在 `base/boot.img`（怎么 dump、怎么校验见
-  [`base/README.md`](base/README.md)）；
-- 或者什么都不放，跑 workflow 时在 `base_url` 填一个能下到你手机boot镜像的直链。
+**② 基线镜像**：仓库自带 `base/boot.img`（21,364,736 字节，内核 + 厂商 CINIT ramdisk），不用管。
+想换成自己机器的就替换它，或者跑 workflow 时在 `base_url` 填直链——详见 [`base/README.md`](base/README.md)。
 
 **③ 跑 workflow**：`Actions → build-kernel → Run workflow`
 
@@ -81,7 +78,7 @@ kernel-modules/k50-bl/            外部模块：把面板背光接进 Linux bac
 | `config_source` | `auto` | `auto` / `repo` / `stock` |
 | `modules` | `k50-bl` | 逗号分隔的外部模块，留空不编 |
 | `optional_patches` | `false` | 打不打 `patches/optional/` 里的补丁 |
-| `trim_debug_info` | `false` | 设 `true` 会关掉 `DEBUG_INFO`：`vmlinux` 从 569 MB 掉到 71 MB、编得快，**但 gzip 后的内核反而大 164 KB，超出厂商内核段上限，`boot.img` 打不出来**，所以默认 `false`；踩坑细节见常见问题 |
+| `trim_debug_info` | `false` | 设 `true` 会关掉 `DEBUG_INFO`：`vmlinux` 从 569 MB 掉到 71 MB、编得快，**但 gzip 后的内核反而大 164 KB，超出 `base/boot.img` 头里的 `kernel_size`，`boot.img` 打不出来**，所以默认 `false`；踩坑细节见常见问题 |
 | `pack_boot` | `auto` | `auto` / `yes` / `no` |
 | `keep_releases` | `10` | `ci-*` Release 保留几个，旧的自动删 |
 
@@ -185,8 +182,8 @@ select 回 `y`（本地实测就是这样：步骤打印"已关闭 DEBUG_INFO"�
 逐字节比有 **24,251,244 字节不一样**（`vmlinux` 一个 70 MB、一个 569 MB），`gzip -9 -n` 之后
 **从 19,932,644 涨到 20,097,258（+164,614）**。
 
-后果很直接：Option B 的硬上限是头里的 `kernel_size` = 19,945,390 字节，"trim 过"的内核塞不进去
-（打包器自己压出 20,097,258，超 151,868，直接拒绝打包），不 trim 的塞得进，但余量只有几 KB。
+后果很直接：Option B 的硬上限是头里的 `kernel_size` = 19,968,647 字节，"trim 过"的内核塞不进去
+（打包器自己压出 20,097,258，超 128,611，直接拒绝打包），不 trim 的塞得进，余量 22,398 字节。
 所以**要出 `boot.img` 就必须 `trim_debug_info=false`**（默认已经是 `false`），`true` 只适合
 "只要内核产物、不打包"的场合。它省的是编译时间和磁盘，不省产物。
 
@@ -204,12 +201,12 @@ select 回 `y`（本地实测就是这样：步骤打印"已关闭 DEBUG_INFO"�
 <details>
 <summary><b>余量很小，心里要有数。</b></summary>
 
-这套配置编出来的 `Image` 是 52,894,208 字节，gzip 之后在 19,93x,xxx 量级，上限 19,945,390——
-余量只有几 KB。注意这里有两个 gzip：workflow 另外出的 `Image.gz` 走 `gzip -9 -n`，而**打包器用
+这套配置编出来的 `Image` 是 52,894,208 字节，gzip 之后 19,946,249，上限 19,968,647
+（`base/boot.img` 头里的 `kernel_size`）——余量 22,398 字节。注意这里有两个 gzip：workflow 另外出的 `Image.gz` 走 `gzip -9 -n`，而**打包器用
 自己的 zlib 再压一遍**，两者能差几十 KB，判定能不能塞下的是打包器那份。内核再长一点点，下次
 构建就开始拒绝打包。
 
-实测：树内构建出来的 `Image` 跑 `scripts/k50-pack-boot.py`，六个检查全过，输出 67,108,864 字节的
+实测：树内构建出来的 `Image` 跑 `scripts/k50-pack-boot.py`，六个检查全过，输出 21,364,736 字节的
 `boot.img`（跟基线同尺寸、头部逐字节不变、ramdisk 区原样复制）。
 
 </details>

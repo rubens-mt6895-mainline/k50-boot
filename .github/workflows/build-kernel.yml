@@ -53,6 +53,7 @@ on:
     branches: [main, master]
     paths:
       - "config/**"
+      - "base/**"
       - "patches/**"
       - "scripts/**"
       - "kernel-modules/**"
@@ -223,8 +224,8 @@ jobs:
           fi
           # 可选：关掉调试信息（vmlinux 从 569MB 降到 71MB、编得快）
           # **但这会让 boot.img 打不出来**：实测关掉后 Image 内容有 24,251,244 字节不同，
-          # gzip(-9) 从 19,932,644 涨到 20,097,258（+164,614），而厂商内核段上限只有
-          # 19,945,390 → 打包会因「塞不进原内核段」而失败。所以 config/config 里默认 false。
+          # gzip(-9) 从 19,932,644 涨到 20,097,258（+164,614），而 base/boot.img 头里的 kernel_size 只有
+          # 19,968,647 → 打包会因「塞不进原内核段」而失败。所以 config/config 里默认 false。
           # 注意：CONFIG_DEBUG_INFO 是「无 prompt 的 bool」，由 "Debug information" 这个
           # choice 的成员 select 出来。只 -d DEBUG_INFO 是没用的 —— olddefconfig 会把
           # 还生效的 choice 成员（DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT）重新 select 回来，
@@ -414,7 +415,7 @@ jobs:
             - 触发：${{ github.event_name }}
             - 详细说明见资产里的 `BUILD.txt`
 
-            刷机前先备份 boot_a；`boot.img` 只在提供了基线镜像时才会出现。
+            刷机前先备份 boot_a；`boot.img` 用仓库自带的 `base/boot.img` 打，换成自己的用 `base_url`。
           files: dist/*
 
       - name: 清理旧 Release

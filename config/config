@@ -33,7 +33,7 @@ optional_patches=false
 # 只影响编译时间/磁盘大小？**不是**。实测（同一源码、同一工具链）：
 #   关掉 DEBUG_INFO → Image 内容有 24,251,244 字节不同，gzip(-9) 从 19,932,644
 #                     涨到 20,097,258 字节（+164,614）
-#   厂商内核段上限是 19,945,390 字节 → **关掉后 boot.img 直接塞不进去**（打包失败）
+#   基线 base/boot.img 头里的 kernel_size = 19,968,647 字节 → **关掉后 boot.img 直接塞不进去**（打包失败）
 # 所以默认 false：要出 boot.img 就别关。true 只适合"只要内核产物、不打包"的场景。
 # false = 保留调试信息（默认，且必须；vmlinux 约 569 MB）
 # true  = 关掉 DEBUG_INFO（vmlinux 约 71 MB、编得快，但 gzip 反而大 164 KB）
