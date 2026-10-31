@@ -177,7 +177,11 @@ jobs:
               continue
             fi
             echo "== 应用：$(basename "$p")"
-            git -C "$KERNEL_DIR" apply --index "$p"
+            # 不用 --index：我们不需要把补丁写进索引（后面只读工作区），
+            # 而 --index 会要求工作区与索引逐条严格匹配——一旦这棵树是从别处
+            # 整拷贝/快照过来的（索引 stat 缓存不是自己写的），就会莫名报
+            # "does not match index" 而失败。普通 apply 只看工作区，稳。
+            git -C "$KERNEL_DIR" apply "$p"
             applied=$((applied+1))
           done
           if [ "${{ steps.cfg.outputs.optional_patches }}" = "true" ]; then
@@ -186,7 +190,7 @@ jobs:
                 echo "== 已存在，跳过：$(basename "$p")"; continue
               fi
               echo "== 应用（可选）：$(basename "$p")"
-              git -C "$KERNEL_DIR" apply --index "$p"
+              git -C "$KERNEL_DIR" apply "$p"
               applied=$((applied+1))
             done
           fi

@@ -164,6 +164,13 @@ srctree 前缀。`O=` 构建时 `srctree` 是相对路径 `..`，展开成 `-I..
 （`mtk_btif.o`、`mtk_btif_exp.o`、`btif_dma_plat.o`、`btif_plat.o`）全部编出来，
 `O=build` 那次则在这三个文件上直接 `fatal error`。
 
+**Q：打补丁为什么用 `git apply` 而不是 `git apply --index`？**
+因为不需要索引（后面所有步骤都只读工作区），而 `--index` 会额外要求工作区与索引逐条
+严格匹配：如果这棵内核树是从别处整拷贝/快照过来的（索引里的 stat 缓存不是它自己写的），
+就会在第二个补丁上报 `error: <file>: does not match index` 直接失败——本地复跑时真撞到过。
+普通 `apply` 只看工作区内容，稳。幂等性仍由 `apply --reverse --check` 保证
+（上游把补丁合进去以后这里会自动跳过）。
+
 **Q：`trim_debug_info=true` 真的把 `DEBUG_INFO` 关掉了吗？**
 踩过坑，现在是真的关了，而且会断言。`CONFIG_DEBUG_INFO` 在 `lib/Kconfig.debug` 里是
 **没有 prompt 的 bool**（"A kernel debug info option other than None has been selected
