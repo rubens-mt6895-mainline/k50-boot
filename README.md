@@ -147,8 +147,9 @@ K50 上 `boot_a = /dev/sdc43`（64 MiB）。
 在真机上验证过能开机的差分方式。
 
 **Q：构建一次多久？**
-4 核 x86 runner 冷编译大约 1～2 小时（有 ccache 缓存后 10～20 分钟）。
-有 arm64 机器的话，Run workflow 时把 `runner` 下拉框换成 `ubuntu-24.04-arm` 会快不少。
+默认跑在原生 arm64 runner（`ubuntu-24.04-arm`）上，冷编译大约 1 小时上下（有 ccache 后 10～20 分钟）。
+仓库是**公开**的所以能直接用它；私有仓库拿不到 arm64 runner，Run workflow 时把 `runner` 下拉框
+换成 `ubuntu-24.04` 走交叉编译即可（会慢一些）。
 缓存按 `kernel_ref` 分桶，所以换分支会重新冷编。
 
 **Q：为什么 workflow 用树内构建，不把产物放到 `build/` 目录（`O=build`）？**
