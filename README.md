@@ -256,3 +256,10 @@ actionlint .github/workflows/build-kernel.yml
 
 内核补丁（`patches/`）遵循 GPL-2.0（与上游内核一致）；本仓库脚本与文档为 MIT。
 仓库**不含**任何厂商二进制。
+
+## 常见问题（补）：`set -euo pipefail` + `| grep -q` / `| head -1` 会假失败
+
+每个 step 都以 `set -euo pipefail` 开头。此时 `… | grep -q` 或 `… | head -1` 这类
+「读到就退出」的消费者会给上游发 SIGPIPE（上游 `rc=141`），整条管道被判失败 ——
+明明匹配成功却返回非 0。本 workflow 里已统一改成 `grep -c … >/dev/null` 与
+`sed -n '1p'`；自己加 step 时请沿用这个写法。

@@ -92,7 +92,7 @@ jobs:
         id: cfg
         run: |
           set -euo pipefail
-          get() { sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" config/config | head -n1 | tr -d '\r' | sed 's/[[:space:]]*$//'; }
+          get() { sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" config/config | sed -n '1p' | tr -d '\r' | sed 's/[[:space:]]*$//'; }
           KREPO="$(get kernel_repo)"
           KREF="$(get kernel_ref)"
           LV="$(get localversion)"
@@ -140,9 +140,9 @@ jobs:
                                    zstd xz-utils clang-18 lld-18 llvm-18 ccache python3
           echo "/usr/lib/llvm-18/bin" >> "$GITHUB_PATH"
           export PATH="/usr/lib/llvm-18/bin:$PATH"
-          clang --version | head -1
-          ld.lld --version | head -1
-          ccache --version | head -1
+          clang --version | sed -n '1p'
+          ld.lld --version | sed -n '1p'
+          ccache --version | sed -n '1p'
 
       - name: ccache
         uses: hendrikmuhs/ccache-action@v1.2
@@ -265,7 +265,7 @@ jobs:
           KREL="$(make -s -C "$KDIR" ARCH=arm64 LLVM=1 LOCALVERSION="$LV" kernelrelease)"
           echo "KREL=$KREL" >> "$GITHUB_ENV"
           echo "内核版本：$KREL"
-          ccache --show-stats | head -12
+          ccache --show-stats | sed -n '1,12p'
 
       - name: 编译外部模块
         if: steps.cfg.outputs.modules != ''
@@ -297,7 +297,7 @@ jobs:
           for ko in dist/*.ko; do
             mver="$(modinfo -F vermagic "$ko" 2>/dev/null | awk '{print $1}')"
             if [ -z "$mver" ]; then
-              mver="$(grep -ao 'vermagic=[^[:cntrl:]]*' "$ko" | head -1 | cut -d= -f2 | awk '{print $1}')"
+              mver="$(grep -ao 'vermagic=[^[:cntrl:]]*' "$ko" | sed -n '1p' | cut -d= -f2 | awk '{print $1}')"
             fi
             if [ "$mver" != "$KMAGIC" ]; then
               echo "::error::$(basename "$ko") vermagic=$mver 与内核 $KMAGIC 不一致"
@@ -327,7 +327,7 @@ jobs:
             echo "源码 ref      : ${{ steps.cfg.outputs.kernel_ref }}"
             echo "源码提交      : ${COMMIT}"
             echo "localversion  : '${{ steps.cfg.outputs.localversion }}'"
-            echo "工具链        : $(clang --version | head -1)"
+            echo "工具链        : $(clang --version | sed -n '1p')"
             patch_list=""
             for p in patches/*.patch; do [ -f "$p" ] && patch_list="$patch_list $(basename "$p")"; done
             echo "补丁          : ${patch_list# }"
@@ -359,7 +359,7 @@ jobs:
             exit 0
           fi
           ls -l "$BASE"
-          head -c8 "$BASE" | grep -q 'ANDROID!' || { echo "::error::基线不是 MTK boot image（magic 不是 ANDROID!）"; exit 1; }
+          [ "$(head -c8 "$BASE")" = 'ANDROID!' ] || { echo "::error::基线不是 MTK boot image（magic 不是 ANDROID!）"; exit 1; }
           BASESHA="$(sha256sum "$BASE" | cut -d' ' -f1)"
           echo "BASESHA=$BASESHA" >> "$GITHUB_ENV"
           if python3 scripts/k50-pack-boot.py --base "$BASE" --image dist/Image --out dist/boot.img; then
