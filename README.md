@@ -232,6 +232,23 @@ gzip 之后在 19,93x,xxx 量级，而 Option B 的硬上限是 19,945,390 字�
 "Option B"（没写 shift）。回滚 `boot_a` 后把 `config/stock_defconfig`（你自己
 设备的配置）传上去重编。
 
+**Q：workflow 本身有没有低级错误？**
+本仓库的 `build-kernel.yml` 过了 `actionlint`（含 shellcheck）0 告警：
+
+```bash
+# 装一次（Linux / WSL）
+V=$(curl -fsSL https://api.github.com/repos/rhysd/actionlint/releases/latest \
+      | sed -n 's/.*"tag_name": "\([^"]*\)".*/\1/p' | head -1)
+curl -fsSL -o /tmp/al.tgz \
+  "https://github.com/rhysd/actionlint/releases/download/$V/actionlint_${V#v}_linux_amd64.tar.gz"
+sudo tar -xzf /tmp/al.tgz -C /usr/local/bin actionlint
+# 检查
+actionlint .github/workflows/build-kernel.yml
+```
+
+另外 `tools/run-steps.py` 能把指定的 `run:` 块**真的在本机跑起来**（带 `${{ }}` 展开
+与 `GITHUB_ENV`/`GITHUB_OUTPUT` 语义）：改动 workflow 后，先跑一遍要动的 step 再推。
+
 ---
 
 ## 许可
