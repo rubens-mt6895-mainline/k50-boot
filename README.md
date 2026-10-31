@@ -264,5 +264,5 @@ actionlint .github/workflows/build-kernel.yml
 
 ## 许可
 
-`patches/` 跟随上游内核 GPL-2.0；`kernel-modules/k50-bl/` 是 GPL-2.0；
-脚本和文档 MIT。
+`LICENSE` 是 GPL-2.0 全文：`patches/` 跟上游内核走，`kernel-modules/k50-bl/` 用内核内部符号，只能是 GPL。
+脚本、配置、文档另外以 MIT 提供。细节见 [NOTICE.md](NOTICE.md)。
