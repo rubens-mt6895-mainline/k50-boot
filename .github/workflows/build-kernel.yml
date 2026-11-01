@@ -337,7 +337,7 @@ jobs:
             echo
             echo "Image    : $(stat -c%s dist/Image) 字节"
             echo "Image sha: $(sha256sum dist/Image | cut -d' ' -f1)"
-            echo "Image.gz : $(stat -c%s dist/Image.gz) 字节"
+            echo "Image.gz : $(stat -c%s dist/Image.gz) 字节（gzip -9 -n，随附资产；真正进 boot.img 的是打包器自己压的那份，见下面「内核段余量」）"
             echo
             echo "注意：vermagic 变了，设备 /root 下现成的 .ko 需要重编才能 insmod。"
           } > dist/BUILD.txt
@@ -363,19 +363,24 @@ jobs:
           [ "$(head -c8 "$BASE")" = 'ANDROID!' ] || { echo "::error::基线不是 MTK boot image（magic 不是 ANDROID!）"; exit 1; }
           BASESHA="$(sha256sum "$BASE" | cut -d' ' -f1)"
           echo "BASESHA=$BASESHA" >> "$GITHUB_ENV"
-          if python3 scripts/k50-pack-boot.py --base "$BASE" --image dist/Image --out dist/boot.img; then
-            MODE="Option B（只换内核段；头部与 ramdisk 逐字节不动）"
-          else
-            echo "::warning::新内核塞不进原内核段 → 改用 --allow-shift，ramdisk 会整体后移，这条路径没在真机验证过"
-            python3 scripts/k50-pack-boot.py --base "$BASE" --image dist/Image --out dist/boot.img --allow-shift
-            MODE="Option B + shift（ramdisk 已后移，风险自负）"
+          # 上限就是基线自己的 kernel_size（Option B 不动 4096 字节头部）。超限不再自动挪 ramdisk：
+          # --allow-shift 那条路真机翻车过，静默走它等于发一个可能开不了机的镜像。
+          KSIZE="$(python3 -c "import struct;print(struct.unpack_from('<I',open('$BASE','rb').read(4096),8)[0])")"
+          NEWSZ="$(python3 -c "import gzip;print(len(gzip.compress(open('dist/Image','rb').read(),mtime=0)))")"
+          echo "基线内核段 kernel_size = $KSIZE；本次 gzip 后 = $NEWSZ；余量 = $((KSIZE-NEWSZ)) 字节"
+          if [ "$NEWSZ" -gt "$KSIZE" ]; then
+            echo "::error::新内核 $NEWSZ 字节塞不进基线内核段 $KSIZE 字节（差 $((NEWSZ-KSIZE))）。--allow-shift 会整体后移 ramdisk，这条路径没在真机验证过，不再自动走。要么精简内核配置，要么用 base_url 换一个 kernel_size 更大的基线。"
+            exit 1
           fi
+          python3 scripts/k50-pack-boot.py --base "$BASE" --image dist/Image --out dist/boot.img
+          MODE="Option B（只换内核段；头部与 ramdisk 逐字节不动）"
           {
             echo
             echo "boot.img   : $(stat -c%s dist/boot.img) 字节"
             echo "boot sha   : $(sha256sum dist/boot.img | cut -d' ' -f1)"
             echo "基线镜像   : ${BASESHA}"
             echo "打包方式   : ${MODE}"
+            echo "内核段余量 : $((KSIZE-NEWSZ)) 字节（真正进 boot.img 的 gzip = $NEWSZ；随附的 Image.gz 是另一个数）"
             echo
             echo "刷入（先备份！）："
             echo "  fastboot flash boot_a boot.img"
@@ -399,17 +404,25 @@ jobs:
           path: dist/*
           retention-days: 14
 
+      - name: 生成发布标签
+        run: |
+          set -euo pipefail
+          TAG="ci-$(date -u +%Y%m%d-%H%M%S-UTC)${{ inputs.tag_suffix }}"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "标签：$TAG"
+
       - name: 发布 Release
         if: ${{ inputs.publish_release != 'no' }}
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ci-${{ github.run_number }}-${{ github.run_attempt }}${{ inputs.tag_suffix }}
-          name: "CI ${{ env.KREL }} (${{ github.run_number }})"
+          tag_name: ${{ env.TAG }}
+          name: "CI ${{ env.KREL }} (${{ env.TAG }})"
           prerelease: true
           make_latest: false
           body: |
             K50（rubens / MT6895）CI 内核构建
 
+            - 标签：`${{ env.TAG }}`
             - 内核版本：`${{ env.KREL }}`
             - 源码提交：`${{ env.COMMIT }}`
             - 触发：${{ github.event_name }}
