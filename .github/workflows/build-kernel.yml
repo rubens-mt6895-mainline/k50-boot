@@ -288,8 +288,15 @@ jobs:
             drivers/bluetooth
             drivers/net/wireless/mediatek/mt76
           )
-          make -C "$KDIR" ARCH=arm64 LLVM=1 CC="ccache clang" -j"$(nproc)" \
-               LOCALVERSION="$LV" "${TREES[@]}"
+          # M= 的 modpost 要 Module.symvers；只编 Image 时这里只有 vmlinux.symvers
+          [ -f "$KDIR/Module.symvers" ] || cp "$KDIR/vmlinux.symvers" "$KDIR/Module.symvers"
+          # 目录目标（make drivers/bluetooth）在单次 make 里什么也不编，因为该目录的 =m
+          # 不在本次目标集合里；M=<dir> modules 才会按 .config 把该目录的模块真正建出来。
+          for tree in "${TREES[@]}"; do
+            echo "== 编译模块树：$tree"
+            make -C "$KDIR" ARCH=arm64 LLVM=1 CC="ccache clang" -j"$(nproc)" \
+                 LOCALVERSION="$LV" M="$tree" modules
+          done
           MODROOT="dist/modules/lib/modules/$KREL"
           rm -rf dist/modules && mkdir -p "$MODROOT"
           COUNT=0
