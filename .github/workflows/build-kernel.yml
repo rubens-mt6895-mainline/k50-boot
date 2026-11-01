@@ -268,6 +268,28 @@ jobs:
           echo "内核版本：$KREL"
           ccache --show-stats | sed -n '1,12p'
 
+      - name: 编译内核模块
+        run: |
+          set -euo pipefail
+          # defconfig 里 =m 的部分（MT7921E、BT_HCIUART 这些大块头）单独编出来打成
+          # tar.gz 随 Release 发：boot 分区的内核段只有 ~19.9 MB，这些驱动编进内核
+          # Image 就塞不下。系统侧由 k50-rootfs 负责把包解到 /usr/lib/modules。
+          KDIR="$PWD/$KERNEL_DIR"
+          LV="${{ steps.cfg.outputs.localversion }}"
+          make -C "$KDIR" ARCH=arm64 LLVM=1 CC="ccache clang" -j"$(nproc)" \
+               LOCALVERSION="$LV" modules
+          KREL="$(cat "$KDIR/include/config/kernel.release")"
+          rm -rf dist/modules && mkdir -p dist/modules
+          # modules_install 自带 depmod，modules.dep 一起进包，系统侧不用再跑
+          make -C "$KDIR" ARCH=arm64 LLVM=1 LOCALVERSION="$LV" \
+               INSTALL_MOD_PATH="$PWD/dist/modules" modules_install
+          # build/source 是指向构建机的软链，去掉
+          rm -f "dist/modules/lib/modules/$KREL/build" "dist/modules/lib/modules/$KREL/source"
+          tar -C dist/modules -czf "dist/k50-modules-${KREL}.tar.gz" .
+          echo "MODULES_TGZ=k50-modules-${KREL}.tar.gz" >> "$GITHUB_ENV"
+          ls -l "dist/k50-modules-${KREL}.tar.gz"
+          tar -tzf "dist/k50-modules-${KREL}.tar.gz" | sed -n '1,5p'
+
       - name: 编译外部模块
         if: steps.cfg.outputs.modules != ''
         run: |
@@ -334,6 +356,9 @@ jobs:
             echo "补丁          : ${patch_list# }"
             if [ "${{ steps.cfg.outputs.optional_patches }}" = "true" ]; then echo "可选补丁      : 已应用"; fi
             echo "外部模块      : '${{ steps.cfg.outputs.modules }}'"
+            if [ -n "${MODULES_TGZ:-}" ]; then
+              echo "内核模块包    : $MODULES_TGZ（$(stat -c%s "dist/$MODULES_TGZ") 字节；解到 /usr/lib/modules/ 下，k50-rootfs 会自动取）"
+            fi
             echo
             echo "Image    : $(stat -c%s dist/Image) 字节"
             echo "Image sha: $(sha256sum dist/Image | cut -d' ' -f1)"
