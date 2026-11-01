@@ -232,6 +232,21 @@ workflow 的「编译外部模块」先跑了 `make ... LOCALVERSION=<同内核>
 </details>
 
 <details>
+<summary><b>蓝牙起不来 / 某个外设"设备不存在"？先看它是不是被编成了模块</b></summary>
+
+**这个 CI 只产出 `Image` 和外部模块，从不 `make modules_install`** —— 也就是
+`/usr/lib/modules/` 永远不会被装进 rootfs 镜像。所以任何一个 `=m` 的驱动，
+刷出来的系统里都**没有对应的 `.ko`，设备就等于不存在**。
+
+真机踩过：`CONFIG_BT_HCIUART=m` → 蓝牙打不开；`CONFIG_HID_MULTITOUCH=m`、
+`CONFIG_I2C_HID_OF=m` → 相关 HID 设备不出现。凡是这台机器**要用**的驱动，
+都在 `patches/0001-...defconfig` 里写成 `=y`（`BT_HCIUART`、`MT7921E`、
+`HID_MULTITOUCH`、`I2C_HID_OF` 都已改）。要加新的外设驱动时别写成 `=m`，
+除非你同时把模块装进 rootfs（需要 rootfs 仓那边配合，目前没做）。
+
+</details>
+
+<details>
 <summary><b>编出来的内核启动不了？</b></summary>
 
 先看 `BUILD.txt` 里的源码提交和补丁列表，确认 `boot.img` 是不是"Option B"（没写 shift）。
