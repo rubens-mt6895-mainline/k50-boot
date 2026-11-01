@@ -271,29 +271,38 @@ jobs:
       - name: 编译内核模块
         run: |
           set -euo pipefail
-          # 只编 K50 用得到的这几个。defconfig 是厂商 savedefconfig，里面 =m 的驱动有
-          # 一大片（mt8183/mt8192 声卡之类），从没在这份配置下编过，上游代码在 clang 下
+          # 只编 K50 用得到的两个模块树。defconfig 是厂商 savedefconfig，里面 =m 的驱动
+          # 有一大片（mt8183/mt8192 声卡之类），从没在这份配置下编过，上游代码在 clang 下
           # 直接报错（sound/soc/mediatek/mt8183/mt8183-afe-pcm.c: redefinition of
-          # enumerator 'MTK_AFE_RATE_8K'），所以按路径点名编，不跑整树 make modules。
+          # enumerator 'MTK_AFE_RATE_8K'），所以只点名编这两个目录，不跑整树 make modules：
+          #   drivers/bluetooth/ —— btusb（MT7921 的蓝牙走 USB，BT_HCIBTUSB_MTK=y）+ hci_uart，
+          #     btintel/btbcm/btmtk 是 btusb 的依赖模块，单编 btusb 过不了 modpost
+          #   drivers/net/wireless/mediatek/mt76/ —— mt7921e（Wi-Fi 走 PCIe）+ 它依赖的
+          #     mt76 / mt76-connac-lib / mt792x-lib / mt7921-common
           # 为什么这几个要 =m：boot 分区的内核段只有 ~19.9 MB，MT7921E/BT_HCIUART 这类
-          # 编进 Image 就塞不下（实测超 11 万字节），只能单独打成包发给 rootfs 装。
+          # 编进 Image 就塞不下（实测超 11 万字节），只能单独打包发给 rootfs 装。
           KDIR="$PWD/$KERNEL_DIR"
           LV="${{ steps.cfg.outputs.localversion }}"
           KREL="$(cat "$KDIR/include/config/kernel.release")"
-          MODS=(
-            drivers/net/wireless/mediatek/mt76/mt7921/mt7921e.ko
-            drivers/bluetooth/btusb.ko
-            drivers/bluetooth/hci_uart.ko
+          TREES=(
+            drivers/bluetooth
+            drivers/net/wireless/mediatek/mt76
           )
           make -C "$KDIR" ARCH=arm64 LLVM=1 CC="ccache clang" -j"$(nproc)" \
-               LOCALVERSION="$LV" "${MODS[@]}"
+               LOCALVERSION="$LV" "${TREES[@]}"
           MODROOT="dist/modules/lib/modules/$KREL"
           rm -rf dist/modules && mkdir -p "$MODROOT"
-          for m in "${MODS[@]}"; do
-            [ -f "$KDIR/$m" ] || { echo "::error::$m 没编出来"; exit 1; }
-            install -D -m 0644 "$KDIR/$m" "$MODROOT/kernel/$m"
+          COUNT=0
+          for tree in "${TREES[@]}"; do
+            while IFS= read -r -d '' ko; do
+              rel="${ko#"$KDIR/"}"
+              install -D -m 0644 "$ko" "$MODROOT/kernel/$rel"
+              COUNT=$((COUNT + 1))
+            done < <(find "$KDIR/$tree" -name '*.ko' -type f -print0)
           done
-          # depmod 生成 modules.dep（内核不认手装的 .ko 路径，自动加载靠这个索引）
+          [ "$COUNT" -gt 0 ] || { echo "::error::一个模块都没编出来"; exit 1; }
+          echo "编出 $COUNT 个模块"
+          # depmod 生成 modules.dep（内核自动加载 .ko 靠这个索引）
           depmod -b dist/modules "$KREL"
           tar -C dist/modules -czf "dist/k50-modules-${KREL}.tar.gz" .
           echo "MODULES_TGZ=k50-modules-${KREL}.tar.gz" >> "$GITHUB_ENV"
