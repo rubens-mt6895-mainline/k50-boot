@@ -1,0 +1,94 @@
+input: misc: mtk-spmi-keys 修正音量上键（HOMEKEY）的电平极性
+
+真机实测（2026-11-01，CI 内核 7.2.0-k50-ci-gbc95db8659e3-dirty）：
+按住音量上键时 MT6363 TOPSTATUS = 0x1e，松开为 0x16，即 bit3 是
+active-high；而 PWRKEY(bit1) 空闲为 1、按下为 0，是 active-low。
+驱动原来对两位都用 active-low 判定，于是 HOMEKEY 在按住时被判成
+"松开"，evdev 上根本收不到 KEY_VOLUMEUP —— 表现就是按音量上毫无反应
+（GNOME 的 media-keys 绑定本身也是空的，那是另一层问题，已由
+k50-volkeys.service 在用户态补上）。
+
+同时给按键加 400 ms 释放宽限：PMIC 在事件后约 185 ms 就清状态位，
+30 ms 轮询会看到 4 Hz 抖动，按住会被上报成连点。
+
+--- a/drivers/input/misc/mtk-spmi-keys.c
++++ b/drivers/input/misc/mtk-spmi-keys.c
+@@ -26,6 +26,7 @@
+  */
+ 
+ #include <linux/input.h>
++#include <linux/jiffies.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
+@@ -35,6 +36,12 @@
+ 
+ #define MTK_KEYS_MAX		2
+ #define MTK_KEYS_POLL_MS	30
++/*
++ * MT6363 TOPSTATUS 的 PWRKEY/HOMEKEY 位会在按键事件后约 185 ms 被 PMIC
++ * 自动清零，30 ms 轮询会看到 4 Hz 的抖动。这里给一个释放宽限，让"按住"
++ * 在逻辑上保持按下，松开超过宽限才上报 release。
++ */
++#define MTK_KEYS_RELEASE_GRACE_MS	400
+ 
+ static const struct regmap_config mtk_keys_regmap_config = {
+ 	.reg_bits	= 16,
+@@ -45,6 +52,7 @@
+ struct mtk_keys_info {
+ 	unsigned int keycode;
+ 	u32 deb_mask;
++	bool active_low;
+ 	unsigned int deb_reg;
+ 	bool wakeup;
+ };
+@@ -57,6 +65,7 @@
+ 	struct mtk_keys_info keys[MTK_KEYS_MAX];
+ 	int num_keys;
+ 	bool key_pressed[MTK_KEYS_MAX];
++	unsigned long last_press[MTK_KEYS_MAX];
+ 	u32 last_status;
+ };
+ 
+@@ -79,11 +88,24 @@
+ 	}
+ 
+ 	for (i = 0; i < keys->num_keys; i++) {
+-		bool pressed;
++		bool raw_pressed, pressed;
+ 
+-		pressed = !(status & keys->keys[i].deb_mask);
++		raw_pressed = keys->keys[i].active_low
++			? !(status & keys->keys[i].deb_mask)
++			: !!(status & keys->keys[i].deb_mask);
++
++		if (raw_pressed) {
++			keys->last_press[i] = jiffies;
++			pressed = true;
++		} else {
++			pressed = keys->key_pressed[i] &&
++				  time_before(jiffies,
++					      keys->last_press[i] +
++					      msecs_to_jiffies(MTK_KEYS_RELEASE_GRACE_MS));
++		}
+ 		if (pressed != keys->key_pressed[i]) {
+ 			keys->key_pressed[i] = pressed;
++			dev_info(keys->dev, "key %d (%s)\n", i, pressed ? "down" : "up");
+ 			input_report_key(keys->input_dev,
+ 					 keys->keys[i].keycode, pressed);
+ 			input_sync(keys->input_dev);
+@@ -128,6 +150,14 @@
+ 		 * The stock rubens DT's child order is power then home. */
+ 		info->deb_reg = MT6363_REG_TOPSTATUS;
+ 		info->deb_mask = (i == 0) ? BIT(1) : BIT(3);
++		/*
++		 * 真机实测（2026-11-01，MT6363 TOPSTATUS=0x1e）：
++		 * PWRKEY(bit1) 空闲为 1、按下为 0 -> active-low；
++		 * HOMEKEY(bit3) 空闲为 0、按下为 1 -> active-high。
++		 * 以前两位都按 active-low 处理，导致音量上键永远被当成"松开"，
++		 * 内核根本不上报 KEY_VOLUMEUP（真机现象：按音量上毫无反应）。
++		 */
++		info->active_low = (i == 0);
+ 		info->wakeup = of_property_read_bool(child, "wakeup-source");
+ 		i++;
+ 	}
