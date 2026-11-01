@@ -271,42 +271,48 @@ jobs:
       - name: 编译内核模块
         run: |
           set -euo pipefail
-          # 只编 K50 用得到的两个模块树。defconfig 是厂商 savedefconfig，里面 =m 的驱动
-          # 有一大片（mt8183/mt8192 声卡之类），从没在这份配置下编过，上游代码在 clang 下
-          # 直接报错（sound/soc/mediatek/mt8183/mt8183-afe-pcm.c: redefinition of
-          # enumerator 'MTK_AFE_RATE_8K'），所以只点名编这两个目录，不跑整树 make modules：
-          #   drivers/bluetooth/ —— btusb（MT7921 的蓝牙走 USB，BT_HCIBTUSB_MTK=y）+ hci_uart，
-          #     btintel/btbcm/btmtk 是 btusb 的依赖模块，单编 btusb 过不了 modpost
-          #   drivers/net/wireless/mediatek/mt76/ —— mt7921e（Wi-Fi 走 PCIe）+ 它依赖的
-          #     mt76 / mt76-connac-lib / mt792x-lib / mt7921-common
+          # 只编 K50 用得到的模块。defconfig 是厂商 savedefconfig，=m 有一大片
+          # （mt8183/mt8192 声卡之类），从没在这份配置下编过，clang 直接报错
+          # （sound/soc/mediatek/mt8183/mt8183-afe-pcm.c: redefinition of enumerator
+          # 'MTK_AFE_RATE_8K'），所以不跑整树 make modules。
+          # 蓝牙用点名单：整目录编会把 btqcomsmd 拉进来，它要 qcom_wcnss_open_channel
+          # （drivers/soc/qcom），那棵树整棵没编，modpost 又是一串 undefined。
+          # mt76 用 M=<dir>：目录内自洽（mt76/mt76-connac-lib/mt792x-lib/mt7921-common
+          # 都在同一目录），mt7921e 的依赖全在里面。
           # 为什么这几个要 =m：boot 分区的内核段只有 ~19.9 MB，MT7921E/BT_HCIUART 这类
           # 编进 Image 就塞不下（实测超 11 万字节），只能单独打包发给 rootfs 装。
           KDIR="$PWD/$KERNEL_DIR"
           LV="${{ steps.cfg.outputs.localversion }}"
           KREL="$(cat "$KDIR/include/config/kernel.release")"
-          TREES=(
-            drivers/bluetooth
-            drivers/net/wireless/mediatek/mt76
+          KO=(
+            drivers/bluetooth/hci_uart.ko
+            drivers/bluetooth/btusb.ko
+            drivers/bluetooth/btintel.ko
+            drivers/bluetooth/btbcm.ko
+            drivers/bluetooth/btrtl.ko
+            drivers/bluetooth/btqca.ko
+            drivers/bluetooth/btmtk.ko
           )
+          MT76_DIR=drivers/net/wireless/mediatek/mt76
           # M= 的 modpost 要 Module.symvers；只编 Image 时这里只有 vmlinux.symvers
           [ -f "$KDIR/Module.symvers" ] || cp "$KDIR/vmlinux.symvers" "$KDIR/Module.symvers"
-          # 目录目标（make drivers/bluetooth）在单次 make 里什么也不编，因为该目录的 =m
-          # 不在本次目标集合里；M=<dir> modules 才会按 .config 把该目录的模块真正建出来。
-          for tree in "${TREES[@]}"; do
-            echo "== 编译模块树：$tree"
-            make -C "$KDIR" ARCH=arm64 LLVM=1 CC="ccache clang" -j"$(nproc)" \
-                 LOCALVERSION="$LV" M="$tree" modules
-          done
+          make -C "$KDIR" ARCH=arm64 LLVM=1 CC="ccache clang" -j"$(nproc)" \
+               LOCALVERSION="$LV" "${KO[@]}"
+          make -C "$KDIR" ARCH=arm64 LLVM=1 CC="ccache clang" -j"$(nproc)" \
+               LOCALVERSION="$LV" M="$MT76_DIR" modules
           MODROOT="dist/modules/lib/modules/$KREL"
           rm -rf dist/modules && mkdir -p "$MODROOT"
           COUNT=0
-          for tree in "${TREES[@]}"; do
-            while IFS= read -r -d '' ko; do
-              rel="${ko#"$KDIR/"}"
-              install -D -m 0644 "$ko" "$MODROOT/kernel/$rel"
-              COUNT=$((COUNT + 1))
-            done < <(find "$KDIR/$tree" -name '*.ko' -type f -print0)
+          for m in "${KO[@]}"; do
+            [ -f "$KDIR/$m" ] || { echo "::error::$m 没编出来"; exit 1; }
+            install -D -m 0644 "$KDIR/$m" "$MODROOT/kernel/$m"
+            COUNT=$((COUNT + 1))
           done
+          while IFS= read -r -d '' ko; do
+            rel="${ko#"$KDIR/"}"
+            install -D -m 0644 "$ko" "$MODROOT/kernel/$rel"
+            COUNT=$((COUNT + 1))
+          done < <(find "$KDIR/$MT76_DIR" -name '*.ko' -type f -print0)
           [ "$COUNT" -gt 0 ] || { echo "::error::一个模块都没编出来"; exit 1; }
           echo "编出 $COUNT 个模块"
           # depmod 生成 modules.dep（内核自动加载 .ko 靠这个索引）
