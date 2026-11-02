@@ -337,6 +337,14 @@ jobs:
                LOCALVERSION="$LV" "${KO[@]}"
           make -C "$KDIR" ARCH=arm64 LLVM=1 CC="ccache clang" -j"$(nproc)" \
                LOCALVERSION="$LV" M="$MT76_DIR" modules
+          # 相机：CAMSV 采集驱动只活在 k50-camera 分支，用哪个 kernel_ref 就编哪个。
+          # 配置里没开这个符号时整段跳过，别的分支照旧。
+          MORE_DIRS=""
+          if grep -q '^CONFIG_VIDEO_MTK_CAMSV=' "$KDIR/.config"; then
+            MORE_DIRS="drivers/media/platform/mediatek/camsv"
+            make -C "$KDIR" ARCH=arm64 LLVM=1 CC="ccache clang" -j"$(nproc)" \
+                 LOCALVERSION="$LV" M="$MORE_DIRS" modules
+          fi
           MODROOT="dist/modules/lib/modules/$KREL"
           rm -rf dist/modules && mkdir -p "$MODROOT"
           COUNT=0
@@ -350,6 +358,13 @@ jobs:
             install -D -m 0644 "$ko" "$MODROOT/kernel/$rel"
             COUNT=$((COUNT + 1))
           done < <(find "$KDIR/$MT76_DIR" -name '*.ko' -type f -print0)
+          for d in $MORE_DIRS; do
+            while IFS= read -r -d '' ko; do
+              rel="${ko#"$KDIR/"}"
+              install -D -m 0644 "$ko" "$MODROOT/kernel/$rel"
+              COUNT=$((COUNT + 1))
+            done < <(find "$KDIR/$d" -name '*.ko' -type f -print0)
+          done
           [ "$COUNT" -gt 0 ] || { echo "::error::一个模块都没编出来"; exit 1; }
           echo "编出 $COUNT 个模块"
           # depmod 会要 modules.order / modules.builtin（缺了只是警告），补两个空的
