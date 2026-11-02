@@ -24,6 +24,11 @@ on:
         required: false
         type: string
         default: ""
+      skip_patches:
+        description: "可选：跳过这些补丁（编号或文件名，空格/逗号分隔），用于 kernel_ref 自带 board port 的分支"
+        required: false
+        type: string
+        default: ""
       config_source:
         description: "内核配置来源"
         required: true
@@ -171,12 +176,44 @@ jobs:
           shopt -s nullglob
           applied=0
           skipped=0
+          SKIP="$(printf '%s' '${{ inputs.skip_patches }}' | tr ',' ' ')"
           for p in "$PWD"/patches/[0-9]*.patch; do
+            base="$(basename "$p")"
+            num="${base%%-*}"
+            hit=0
+            for s in $SKIP; do
+              case "$s" in ""|"$num"|"$base"|"$base.patch") hit=1 ;; esac
+            done
+            if [ "$hit" = "1" ]; then
+              echo "== 按输入跳过：$base"
+              skipped=$((skipped+1))
+              continue
+            fi
             # 已经在树里就跳过（这样上游合了以后也不会炸）
             if git -C "$KERNEL_DIR" apply --reverse --check "$p" >/dev/null 2>&1; then
               echo "== 已存在，跳过：$(basename "$p")"
               skipped=$((skipped+1))
               continue
+            fi
+            # 树的版本可能比补丁新（比如相机分支在 board port 之上又改了 DTS）：
+            # 正向 apply conflict、反向 --check 也对不上。这时用补丁的新增行
+            # 做指纹：目标文件里已包含全部指纹行 → 视为已应用（树在此之上
+            # 长了自己的改动）。
+            sig="$(awk '/^\+\+\+ / {f=substr($2,3); next} /^@@/ {next} /^\+/ && f {l=substr($0,2); if (length(l)>=10) print f "\t" l}' "$p" | sort -u | sed -n '1,3p')"
+            if [ -n "$sig" ]; then
+              allhere=1
+              # 不能用 <<EOF heredoc：结束符必须顶格写，会把 YAML 的缩进块截断
+              while IFS=$'\t' read -r pf pl; do
+                if ! { [ -f "$KERNEL_DIR/$pf" ] && grep -Fqx -- "$pl" "$KERNEL_DIR/$pf"; }; then
+                  allhere=0
+                  break
+                fi
+              done < <(printf '%s\n' "$sig")
+              if [ "$allhere" = "1" ]; then
+                echo "== 指纹行已在树中，视为已应用，跳过：$(basename "$p")"
+                skipped=$((skipped+1))
+                continue
+              fi
             fi
             echo "== 应用：$(basename "$p")"
             # 不用 --index：我们不需要把补丁写进索引（后面只读工作区），
