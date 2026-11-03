@@ -320,7 +320,12 @@ jobs:
           # 编进 Image 就塞不下（实测超 11 万字节），只能单独打包发给 rootfs 装。
           KDIR="$PWD/$KERNEL_DIR"
           LV="${{ steps.cfg.outputs.localversion }}"
-          KREL="$(cat "$KDIR/include/config/kernel.release")"
+          # KREL 必须沿用「编译内核」那步带 LOCALVERSION 算出来的值。
+          # 曾经在这里读 include/config/kernel.release，结果是 7.2.0-g<sha>-dirty
+          # （没有 -k50-ci），而模块的 vermagic 是 7.2.0-k50-ci-g<sha>-dirty ——
+          # 模块包解出来的版本目录和 uname -r 对不上，modprobe 直接找不到模块。
+          KREL="${KREL:?KREL 应该由「编译内核」那步导出到 GITHUB_ENV}"
+          echo "模块要装进版本目录：$KREL"
           KO=(
             drivers/bluetooth/hci_uart.ko
             drivers/bluetooth/btusb.ko
@@ -363,15 +368,55 @@ jobs:
             install -D -m 0644 "$ko" "$MODROOT/kernel/$rel"
             COUNT=$((COUNT + 1))
           done < <(find "$KDIR/$MT76_DIR" -name '*.ko' -type f -print0)
-          for d in $MORE_DIRS; do
+          # 媒体树一次 M= 编出来的 .ko 有 180 多个：一半是遥控器键映射（rc-*.ko）、
+          # DVB tuner、USB 摄像头，K50 上一个都用不到，白占 21 MB。这里按目录白名单只留
+          # 相机链路要的：CAMSV 采集（cam_cap）、JPEG 硬件编解码、V4L2 核心、videobuf2。
+          if [ -n "$MORE_DIRS" ]; then
+            KEEP_DIRS=(
+              drivers/media/platform/mediatek/camsv/
+              drivers/media/platform/mediatek/jpeg/
+              drivers/media/v4l2-core/
+              drivers/media/common/videobuf2/
+              drivers/media/mc/
+            )
+            keep=0
+            drop=0
             while IFS= read -r -d '' ko; do
               rel="${ko#"$KDIR/"}"
-              install -D -m 0644 "$ko" "$MODROOT/kernel/$rel"
-              COUNT=$((COUNT + 1))
-            done < <(find "$KDIR/$d" -name '*.ko' -type f -print0)
-          done
+              hit=0
+              for p in "${KEEP_DIRS[@]}"; do
+                case "$rel" in "$p"*) hit=1 ;; esac
+              done
+              if [ "$hit" = 1 ]; then
+                install -D -m 0644 "$ko" "$MODROOT/kernel/$rel"
+                COUNT=$((COUNT + 1))
+                keep=$((keep + 1))
+              else
+                drop=$((drop + 1))
+              fi
+            done < <(find "$KDIR/$MORE_DIRS" -name '*.ko' -type f -print0)
+            echo "媒体模块：留下 $keep 个，丢掉 $drop 个（遥控器/tuner/USB 摄像头等与 K50 无关）"
+            [ "$keep" -gt 0 ] || { echo "::error::媒体模块一个都没留下，白名单写错了"; exit 1; }
+            # 相机链路的核心模块必须在
+            for must in \
+              "kernel/drivers/media/platform/mediatek/camsv/cam_cap.ko" \
+              "kernel/drivers/media/v4l2-core/videodev.ko" ; do
+              [ -f "$MODROOT/$must" ] || { echo "::error::缺了 $must"; exit 1; }
+            done
+          fi
           [ "$COUNT" -gt 0 ] || { echo "::error::一个模块都没编出来"; exit 1; }
           echo "编出 $COUNT 个模块"
+          # 断言：模块的 vermagic 里的版本串必须与 KREL 逐字一致，否则装到设备上
+          # 要么 modprobe 找不到（目录名不符），要么 insmod 报 Invalid module format。
+          PROBE_KO="$(find "$MODROOT/kernel" -name 'hci_uart.ko' -o -name 'mt76.ko' -o -name 'cam_cap.ko' | head -1)"
+          if [ -n "$PROBE_KO" ]; then
+            GOT_VM="$(strings -a "$PROBE_KO" | sed -n 's/^vermagic=\([^ ]*\) .*/\1/p' | head -1)"
+            echo "抽样 vermagic：$GOT_VM（KREL=$KREL）"
+            [ "$GOT_VM" = "$KREL" ] || {
+              echo "::error::模块 vermagic=$GOT_VM 与 KREL=$KREL 不一致，装到设备上加载不了"
+              exit 1
+            }
+          fi
           # depmod 会要 modules.order / modules.builtin（缺了只是警告），补两个空的
           : > "$MODROOT/modules.order"
           : > "$MODROOT/modules.builtin"
@@ -452,7 +497,11 @@ jobs:
             if [ "${{ steps.cfg.outputs.optional_patches }}" = "true" ]; then echo "可选补丁      : 已应用"; fi
             echo "外部模块      : '${{ steps.cfg.outputs.modules }}'"
             if [ -n "${MODULES_TGZ:-}" ]; then
-              echo "内核模块包    : $MODULES_TGZ（$(stat -c%s "dist/$MODULES_TGZ") 字节；解到 /usr/lib/modules/ 下，k50-rootfs 会自动取）"
+              echo "内核模块包    : $MODULES_TGZ（$(stat -c%s "dist/$MODULES_TGZ") 字节）"
+              echo "                包内目录已经是 lib/modules/${KREL}/，装法："
+              echo "                  tar -xzf $MODULES_TGZ -C / && depmod -a ${KREL}"
+              echo "                只想装相机那几个时："
+              echo "                  tar -xzf $MODULES_TGZ -C / lib/modules/${KREL}/kernel/drivers/media"
             fi
             echo
             echo "Image    : $(stat -c%s dist/Image) 字节"
