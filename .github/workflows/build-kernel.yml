@@ -339,9 +339,14 @@ jobs:
                LOCALVERSION="$LV" M="$MT76_DIR" modules
           # 相机：CAMSV 采集驱动只活在 k50-camera 分支，用哪个 kernel_ref 就编哪个。
           # 配置里没开这个符号时整段跳过，别的分支照旧。
+          # 编整棵 drivers/media 而不是只有 camsv/：cam_cap.ko 用 videodev.ko 里的
+          # v4l2_*/vb2_* 符号，而 CONFIG_VIDEO_DEV=m（V4L2 核心是模块）。分开两个
+          # M= 调用编时，modpost 只看得到 vmlinux.symvers，于是报一串
+          # "ERROR: modpost: "v4l2_device_register" [cam_cap.ko] undefined!"。
+          # 放进同一次 M=drivers/media 调用，一次 modpost 全解析，互相都找得到。
           MORE_DIRS=""
           if grep -q '^CONFIG_VIDEO_MTK_CAMSV=' "$KDIR/.config"; then
-            MORE_DIRS="drivers/media/platform/mediatek/camsv"
+            MORE_DIRS="drivers/media"
             make -C "$KDIR" ARCH=arm64 LLVM=1 CC="ccache clang" -j"$(nproc)" \
                  LOCALVERSION="$LV" M="$MORE_DIRS" modules
           fi
