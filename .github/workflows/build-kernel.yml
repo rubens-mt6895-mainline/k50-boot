@@ -282,7 +282,7 @@ jobs:
             echo "已关闭 DEBUG_INFO（注意：这样编出来的 Image gzip 后更大，boot.img 会打包失败）"
           fi
           echo "--- 关键项 ---"
-          grep -E "^CONFIG_(MODULES|BT_HIDP|UHID|DRM_PANEL_L11A_38_0A_0A_DSC_CMD|TOUCHSCREEN_ST_FTS_V521_SPI_L11A|SQUASHFS|SQUASHFS_ZSTD|SQUASHFS_XZ|OVERLAY_FS|BLK_DEV_LOOP)=" "$KDIR/.config" || true
+          grep -E "^CONFIG_(MODULES|BT_HIDP|UHID|DRM_PANEL_L11A_38_0A_0A_DSC_CMD|TOUCHSCREEN_ST_FTS_V521_SPI_L11A|SQUASHFS|SQUASHFS_ZSTD|SQUASHFS_XZ|OVERLAY_FS|BLK_DEV_LOOP|VIDEO_MTK_CAMSV)=" "$KDIR/.config" || true
 
       - name: 编译内核
         run: |
