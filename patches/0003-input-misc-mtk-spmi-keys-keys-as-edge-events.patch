@@ -1,0 +1,121 @@
+input: misc: mtk-spmi-keys 把按键当边沿事件（修音量上键完全不响应）
+
+真机现象（Redmi K50 / MT6363，CI 内核 7.2.0-k50-ci-g454b9b7134b6-dirty）：
+音量上键毫无反应；`journalctl -b -k` 里驱动只在开机时打过一条
+`key 1 (down)`，此后再也没有 down/up，evdev 上零个 KEY_VOLUMEUP。
+硬件侧是好的：按音量上时 TOPSTATUS 在 0x16 与 0x1e 之间切换（bit3 = HOMEKEY）。
+
+根因有两层：
+1. 极性。PWRKEY(bit1) 空闲 1、按下 0（active-low）；HOMEKEY(bit3) 空闲 0、
+   按下 1（active-high）。原驱动两位都按 active-low 判，音量上永远"松开"。
+2. 更关键的是语义。TOPSTATUS 的这两位是**自清零**的：一个边沿之后约
+   185 ms 由 PMIC 自动清掉，即使手指还按着。于是"按住"在 30 ms 轮询下
+   看起来就是 ~5 Hz 的抖动，而任何"按下/松开"的电平状态机都会在第一次
+   边沿后卡在 down 上（第一次上报后再也不会有变化）—— 这正是实测到的
+   一条 down、此后全无。
+
+改法：不再建模按下/松开，把"状态位被置起"直接当成一次点击——
+去抖窗口（300 ms）外的每个置起都上报一次 down+up。按住就会产生重复点击，
+连发节奏由用户态决定；这样不存在任何"卡住"的状态。
+
+--- a/drivers/input/misc/mtk-spmi-keys.c
++++ b/drivers/input/misc/mtk-spmi-keys.c
+--- a/drivers/input/misc/mtk-spmi-keys.c
++++ b/drivers/input/misc/mtk-spmi-keys.c
+@@ -9,6 +9,13 @@
+  * The mainline MediaTek SPMI stack (spmi-mtk-pmif) does not yet provide
+  * an SPMI-PMIC MFD with an interrupt domain (mtk-spmi-pmic is downstream
+  * only), so the keys are polled here instead of using the PMIC IRQs.
++ * The TOPSTATUS debounce bit is self-clearing: it stays set for ~185 ms
++ * after an edge and drops again even while the key is still held.  So we
++ * do not model pressed/released at all -- every set edge is one key click;
++ * a held key simply produces repeated clicks.  Modelling it as a level
++ * leaves the key stuck "down" forever after the first edge (that is what
++ * made KEY_VOLUMEUP dead on the Redmi K50: exactly one report at boot,
++ * never a release, never anything again).
+  * The poll interval is short enough that key debounce behaviour is not
+  * required from the driver (the PMIC debounces internally); we just
+  * read the debounced status bits.
+@@ -26,6 +33,7 @@
+  */
+ 
+ #include <linux/input.h>
++#include <linux/jiffies.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
+@@ -35,6 +43,8 @@
+ 
+ #define MTK_KEYS_MAX		2
+ #define MTK_KEYS_POLL_MS	30
++/* 按住时状态位每 ~185 ms 重新置起一次，间隔小于此值视为同一次抖动。 */
++#define MTK_KEYS_EDGE_GUARD_MS	300
+ 
+ static const struct regmap_config mtk_keys_regmap_config = {
+ 	.reg_bits	= 16,
+@@ -45,6 +55,7 @@
+ struct mtk_keys_info {
+ 	unsigned int keycode;
+ 	u32 deb_mask;
++	bool active_low;
+ 	unsigned int deb_reg;
+ 	bool wakeup;
+ };
+@@ -56,7 +67,7 @@
+ 	struct delayed_work poll_work;
+ 	struct mtk_keys_info keys[MTK_KEYS_MAX];
+ 	int num_keys;
+-	bool key_pressed[MTK_KEYS_MAX];
++	unsigned long last_edge[MTK_KEYS_MAX];
+ 	u32 last_status;
+ };
+ 
+@@ -79,15 +90,26 @@
+ 	}
+ 
+ 	for (i = 0; i < keys->num_keys; i++) {
+-		bool pressed;
+-
+-		pressed = !(status & keys->keys[i].deb_mask);
+-		if (pressed != keys->key_pressed[i]) {
+-			keys->key_pressed[i] = pressed;
+-			input_report_key(keys->input_dev,
+-					 keys->keys[i].keycode, pressed);
+-			input_sync(keys->input_dev);
+-		}
++		bool raw_pressed;
++
++		raw_pressed = keys->keys[i].active_low
++			? !(status & keys->keys[i].deb_mask)
++			: !!(status & keys->keys[i].deb_mask);
++		if (!raw_pressed)
++			continue;
++
++		/* 自清零位：置起的瞬间算一次点击，重复置起 = 还按着。 */
++		if (keys->last_edge[i] &&
++		    time_before(jiffies, keys->last_edge[i] +
++				msecs_to_jiffies(MTK_KEYS_EDGE_GUARD_MS)))
++			continue;
++
++		keys->last_edge[i] = jiffies;
++		dev_dbg(keys->dev, "key %d edge (status=0x%02x)\n", i, status);
++		input_report_key(keys->input_dev, keys->keys[i].keycode, 1);
++		input_sync(keys->input_dev);
++		input_report_key(keys->input_dev, keys->keys[i].keycode, 0);
++		input_sync(keys->input_dev);
+ 	}
+ 
+ reschedule:
+@@ -128,6 +150,12 @@
+ 		 * The stock rubens DT's child order is power then home. */
+ 		info->deb_reg = MT6363_REG_TOPSTATUS;
+ 		info->deb_mask = (i == 0) ? BIT(1) : BIT(3);
++		/*
++		 * 真机实测（MT6363 TOPSTATUS）：PWRKEY(bit1) 空闲 1、按下 0 =>
++		 * active-low；HOMEKEY(bit3) 空闲 0、按下 1 => active-high。
++		 * 两位以前都按 active-low 判，音量上键于是被永远当成"松开"。
++		 */
++		info->active_low = (i == 0);
+ 		info->wakeup = of_property_read_bool(child, "wakeup-source");
+ 		i++;
+ 	}
