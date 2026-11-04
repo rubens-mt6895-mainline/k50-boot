@@ -355,7 +355,11 @@ jobs:
             make -C "$KDIR" ARCH=arm64 LLVM=1 CC="ccache clang" -j"$(nproc)" \
                  LOCALVERSION="$LV" M="$MORE_DIRS" modules
           fi
-          MODROOT="dist/modules/lib/modules/$KREL"
+          # 暂存根用 usr/lib/modules 而不是 lib/modules：Debian 是 usrmerge，/lib 是 -> usr/lib
+          # 的符号链接；tar 包里若含真实的 "./lib/" 目录条目，用 tar -xzf ... -C / 解包会把
+          # 符号链接换成一个空目录，动态加载器与 /lib/systemd/systemd 一起消失，整机所有
+          # 动态链接程序 exec 报 not found（2026-11-04 真机踩过，只能重刷 rootfs）。
+          MODROOT="dist/modules/usr/lib/modules/$KREL"
           rm -rf dist/modules && mkdir -p "$MODROOT"
           COUNT=0
           for m in "${KO[@]}"; do
@@ -421,7 +425,7 @@ jobs:
           : > "$MODROOT/modules.order"
           : > "$MODROOT/modules.builtin"
           # depmod 生成 modules.dep（内核自动加载 .ko 靠这个索引）
-          depmod -b dist/modules "$KREL"
+          depmod -b dist/modules/usr "$KREL"
           tar -C dist/modules -czf "dist/k50-modules-${KREL}.tar.gz" .
           # 打包完把 dist/modules 删掉：后面的「校验和」步骤是 sha256sum dist/*，
           # 留着目录会报 "Is a directory" 直接红
@@ -498,10 +502,13 @@ jobs:
             echo "外部模块      : '${{ steps.cfg.outputs.modules }}'"
             if [ -n "${MODULES_TGZ:-}" ]; then
               echo "内核模块包    : $MODULES_TGZ（$(stat -c%s "dist/$MODULES_TGZ") 字节）"
-              echo "                包内目录已经是 lib/modules/${KREL}/，装法："
+              echo "                包内路径是 usr/lib/modules/${KREL}/（不是 lib/：Debian 的 /lib 是符号链接，"
+              echo "                含真实 lib/ 目录的包装到 / 会把 /lib 顶成空目录，整机动态程序全部 not found）："
               echo "                  tar -xzf $MODULES_TGZ -C / && depmod -a ${KREL}"
               echo "                只想装相机那几个时："
-              echo "                  tar -xzf $MODULES_TGZ -C / lib/modules/${KREL}/kernel/drivers/media"
+              echo "                  tar -xzf $MODULES_TGZ -C / usr/lib/modules/${KREL}/kernel/drivers/media"
+              echo "                若是旧包（路径仍是 lib/modules/），必须加 --keep-directory-symlink："
+              echo "                  tar -xzf 旧包.tar.gz -C / --keep-directory-symlink"
             fi
             echo
             echo "Image    : $(stat -c%s dist/Image) 字节"
