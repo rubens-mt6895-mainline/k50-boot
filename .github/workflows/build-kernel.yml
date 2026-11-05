@@ -223,6 +223,12 @@ jobs:
             git -C "$KERNEL_DIR" apply "$p"
             applied=$((applied+1))
           done
+          # 断言：补丁声明自己必须留下的标记，必须真的在树里。
+          # 之前踩过：补丁"应用成功"却看不出结果是否进了内核，只能靠真机反推。
+          if [ -f "$KERNEL_DIR/drivers/input/misc/mtk-spmi-keys.c" ]; then
+            grep -q 'MTK_KEYS_EDGE_GUARD_MS' "$KERNEL_DIR/drivers/input/misc/mtk-spmi-keys.c" \
+              || { echo "::error::mtk-spmi-keys.c 里没有边沿逻辑，0003 没生效"; exit 1; }
+          fi
           if [ "${{ steps.cfg.outputs.optional_patches }}" = "true" ]; then
             for p in "$PWD"/patches/optional/[0-9]*.patch; do
               if git -C "$KERNEL_DIR" apply --reverse --check "$p" >/dev/null 2>&1; then

@@ -98,7 +98,7 @@ input: misc: mtk-spmi-keys 把按键当边沿事件（修音量上键完全不�
 +			continue;
 +
 +		keys->last_edge[i] = jiffies;
-+		dev_dbg(keys->dev, "key %d edge (status=0x%02x)\n", i, status);
++		dev_info(keys->dev, "key %d edge (status=0x%02x)\n", i, status);
 +		input_report_key(keys->input_dev, keys->keys[i].keycode, 1);
 +		input_sync(keys->input_dev);
 +		input_report_key(keys->input_dev, keys->keys[i].keycode, 0);
