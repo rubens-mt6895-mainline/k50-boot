@@ -1,42 +1,25 @@
-input: misc: mtk-spmi-keys 把按键当边沿事件（修音量上键完全不响应）
+input: misc: mtk-spmi-keys 极性按空闲基线自校准，边沿锁定不重复上报
 
-真机现象（Redmi K50 / MT6363，CI 内核 7.2.0-k50-ci-g454b9b7134b6-dirty）：
-音量上键毫无反应；`journalctl -b -k` 里驱动只在开机时打过一条
-`key 1 (down)`，此后再也没有 down/up，evdev 上零个 KEY_VOLUMEUP。
-硬件侧是好的：按音量上时 TOPSTATUS 在 0x16 与 0x1e 之间切换（bit3 = HOMEKEY）。
+真机事实（Redmi K50 / MT6363 / 7.2.0-k50-ci-g454b9b7134b6-dirty）：
+- 上一版把 active_low 写死成 (i == 0)，结果两份实测都对不上：某次启动
+  TOPSTATUS 空闲 0x18、某次 0x1a；电源键因此永远判成"没按"，音量上则
+  被判成"一直按着"，每 300 ms 刷一次假点击（0→140 s 刷了 373 条）。
+- 说明这两位在不同启动里的空闲电平并不固定，写死极性一定翻车。
 
-根因有两层：
-1. 极性。PWRKEY(bit1) 空闲 1、按下 0（active-low）；HOMEKEY(bit3) 空闲 0、
-   按下 1（active-high）。原驱动两位都按 active-low 判，音量上永远"松开"。
-2. 更关键的是语义。TOPSTATUS 的这两位是**自清零**的：一个边沿之后约
-   185 ms 由 PMIC 自动清掉，即使手指还按着。于是"按住"在 30 ms 轮询下
-   看起来就是 ~5 Hz 的抖动，而任何"按下/松开"的电平状态机都会在第一次
-   边沿后卡在 down 上（第一次上报后再也不会有变化）—— 这正是实测到的
-   一条 down、此后全无。
+改法：
+1. 极性自校准：probe 时读一次 TOPSTATUS 当空闲基线，某位空闲为 1 就按
+   active-low 判、空闲为 0 就按 active-high 判。
+2. 边沿锁定：raw 为真且上一次为假才上报一次 down+up；按住不再刷点击。
+3. 位落下后至少要稳定 MTK_KEYS_EDGE_GUARD_MS 才算新的一次点击，避免
+   自清零抖动（~185 ms 一落一起）被当成连点。
+4. 每次状态变化都打一行 status 日志（只在变化时打），probe 时把每个键的
+   keycode/mask/空闲电平/判定极性打出来 —— 下次真机验证不需要再猜。
 
-改法：不再建模按下/松开，把"状态位被置起"直接当成一次点击——
-去抖窗口（300 ms）外的每个置起都上报一次 down+up。按住就会产生重复点击，
-连发节奏由用户态决定；这样不存在任何"卡住"的状态。
-
+diff --git a/drivers/input/misc/mtk-spmi-keys.c b/drivers/input/misc/mtk-spmi-keys.c
+index b52908c6f518..9cee77f54669 100644
 --- a/drivers/input/misc/mtk-spmi-keys.c
 +++ b/drivers/input/misc/mtk-spmi-keys.c
---- a/drivers/input/misc/mtk-spmi-keys.c
-+++ b/drivers/input/misc/mtk-spmi-keys.c
-@@ -9,6 +9,13 @@
-  * The mainline MediaTek SPMI stack (spmi-mtk-pmif) does not yet provide
-  * an SPMI-PMIC MFD with an interrupt domain (mtk-spmi-pmic is downstream
-  * only), so the keys are polled here instead of using the PMIC IRQs.
-+ * The TOPSTATUS debounce bit is self-clearing: it stays set for ~185 ms
-+ * after an edge and drops again even while the key is still held.  So we
-+ * do not model pressed/released at all -- every set edge is one key click;
-+ * a held key simply produces repeated clicks.  Modelling it as a level
-+ * leaves the key stuck "down" forever after the first edge (that is what
-+ * made KEY_VOLUMEUP dead on the Redmi K50: exactly one report at boot,
-+ * never a release, never anything again).
-  * The poll interval is short enough that key debounce behaviour is not
-  * required from the driver (the PMIC debounces internally); we just
-  * read the debounced status bits.
-@@ -26,6 +33,7 @@
+@@ -26,6 +26,7 @@
   */
  
  #include <linux/input.h>
@@ -44,35 +27,53 @@ input: misc: mtk-spmi-keys 把按键当边沿事件（修音量上键完全不�
  #include <linux/module.h>
  #include <linux/of.h>
  #include <linux/platform_device.h>
-@@ -35,6 +43,8 @@
+@@ -35,6 +36,13 @@
  
  #define MTK_KEYS_MAX		2
  #define MTK_KEYS_POLL_MS	30
-+/* 按住时状态位每 ~185 ms 重新置起一次，间隔小于此值视为同一次抖动。 */
++/*
++ * TOPSTATUS 的按键位是自清零/粘滞的：边沿之后约 185 ms 可能被 PMIC 自己
++ * 清掉（按着也清），也可能一直粘着不落。所以既不能把电平当"按住"，
++ * 也不能每读到一次置起就报一次（那样会 5 Hz 刷点击）。
++ * 这里用"锁定边沿 + 落下后至少稳定这么久才算新的一次点击"。
++ */
 +#define MTK_KEYS_EDGE_GUARD_MS	300
  
  static const struct regmap_config mtk_keys_regmap_config = {
  	.reg_bits	= 16,
-@@ -45,6 +55,7 @@
+@@ -45,6 +53,8 @@ static const struct regmap_config mtk_keys_regmap_config = {
  struct mtk_keys_info {
  	unsigned int keycode;
  	u32 deb_mask;
++	/* 极性不再写死：probe 时按"空闲时这一位是什么"推出来 */
 +	bool active_low;
  	unsigned int deb_reg;
  	bool wakeup;
  };
-@@ -56,7 +67,7 @@
+@@ -56,8 +66,12 @@ struct mtk_keys {
  	struct delayed_work poll_work;
  	struct mtk_keys_info keys[MTK_KEYS_MAX];
  	int num_keys;
 -	bool key_pressed[MTK_KEYS_MAX];
-+	unsigned long last_edge[MTK_KEYS_MAX];
++	/* 边沿锁定：raw 为真且上一次为假才算一次点击，按住不会重复上报 */
++	bool latched[MTK_KEYS_MAX];
++	/* 位落下去的稳定时刻，用来给下一次点击做守卫 */
++	unsigned long last_clear[MTK_KEYS_MAX];
  	u32 last_status;
++	u32 idle_status;
  };
  
-@@ -79,15 +90,26 @@
+ static void mtk_keys_work(struct work_struct *work)
+@@ -78,16 +92,45 @@ static void mtk_keys_work(struct work_struct *work)
+ 		keys->last_status = status;
  	}
  
++	if (status != keys->last_status) {
++		dev_info(keys->dev, "status 0x%02x -> 0x%02x (idle 0x%02x)\n",
++			 keys->last_status, status, keys->idle_status);
++		keys->last_status = status;
++	}
++
  	for (i = 0; i < keys->num_keys; i++) {
 -		bool pressed;
 -
@@ -82,23 +83,34 @@ input: misc: mtk-spmi-keys 把按键当边沿事件（修音量上键完全不�
 -			input_report_key(keys->input_dev,
 -					 keys->keys[i].keycode, pressed);
 -			input_sync(keys->input_dev);
--		}
-+		bool raw_pressed;
++		bool raw;
 +
-+		raw_pressed = keys->keys[i].active_low
++		/* active_low 由 probe 时的空闲电平决定，不再假定 */
++		raw = keys->keys[i].active_low
 +			? !(status & keys->keys[i].deb_mask)
 +			: !!(status & keys->keys[i].deb_mask);
-+		if (!raw_pressed)
-+			continue;
 +
-+		/* 自清零位：置起的瞬间算一次点击，重复置起 = 还按着。 */
-+		if (keys->last_edge[i] &&
-+		    time_before(jiffies, keys->last_edge[i] +
-+				msecs_to_jiffies(MTK_KEYS_EDGE_GUARD_MS)))
++		if (!raw) {
++			/* 落下：从这个时刻起算守卫 */
++			keys->last_clear[i] = jiffies;
++			keys->latched[i] = false;
 +			continue;
+ 		}
 +
-+		keys->last_edge[i] = jiffies;
-+		dev_info(keys->dev, "key %d edge (status=0x%02x)\n", i, status);
++		if (keys->latched[i])
++			continue;	/* 还咬着，不重复上报 */
++
++		/* 刚落下来就又被置起（自清零抖动）视为同一次点击 */
++		if (keys->last_clear[i] &&
++		    time_before(jiffies, keys->last_clear[i] +
++				msecs_to_jiffies(MTK_KEYS_EDGE_GUARD_MS))) {
++			keys->latched[i] = true;
++			continue;
++		}
++
++		keys->latched[i] = true;
++		dev_info(keys->dev, "key %d (code %u) click, status 0x%02x\n",
++			 i, keys->keys[i].keycode, status);
 +		input_report_key(keys->input_dev, keys->keys[i].keycode, 1);
 +		input_sync(keys->input_dev);
 +		input_report_key(keys->input_dev, keys->keys[i].keycode, 0);
@@ -106,16 +118,37 @@ input: misc: mtk-spmi-keys 把按键当边沿事件（修音量上键完全不�
  	}
  
  reschedule:
-@@ -128,6 +150,12 @@
+@@ -100,8 +143,15 @@ static int mtk_keys_parse(struct mtk_keys *keys)
+ 	struct device *dev = keys->dev;
+ 	struct device_node *keys_np, *child;
+ 	struct mtk_keys_info *info;
++	u32 idle = 0;
+ 	int i = 0;
+ 
++	/* 空闲基线：开机后、任何人碰按键之前读到的 TOPSTATUS。 */
++	if (!regmap_read(keys->regmap, MT6363_REG_TOPSTATUS, &idle))
++		keys->idle_status = idle;
++	else
++		dev_warn(dev, "读不到空闲 TOPSTATUS，极性只能按缺省判\n");
++
+ 	/* As an MFD child, dev->of_node IS the "mediatek,mt6363-keys" node. */
+ 	keys_np = of_node_get(dev->of_node);
+ 	if (!keys_np) {
+@@ -128,6 +178,17 @@ static int mtk_keys_parse(struct mtk_keys *keys)
  		 * The stock rubens DT's child order is power then home. */
  		info->deb_reg = MT6363_REG_TOPSTATUS;
  		info->deb_mask = (i == 0) ? BIT(1) : BIT(3);
 +		/*
-+		 * 真机实测（MT6363 TOPSTATUS）：PWRKEY(bit1) 空闲 1、按下 0 =>
-+		 * active-low；HOMEKEY(bit3) 空闲 0、按下 1 => active-high。
-+		 * 两位以前都按 active-low 判，音量上键于是被永远当成"松开"。
++		 * 极性不写死：以"开机后没人碰按键时的这一位"作为空闲电平，
++		 * 空闲为 0 => 按下置 1（active-high）；空闲为 1 => 按下拉 0。
++		 * 真机上 PWRKEY/HOMEKEY 的空闲基线在不同启动里并不一致，
++		 * 写死 active_low 正是上一版把电源键判死、把音量上判成常按的原因。
 +		 */
-+		info->active_low = (i == 0);
++		info->active_low = !!(keys->idle_status & info->deb_mask);
++		dev_info(keys->dev, "key %d: code %u mask 0x%02x idle 0x%02x -> %s\n",
++			 i, info->keycode, info->deb_mask,
++			 keys->idle_status,
++			 info->active_low ? "active-low" : "active-high");
  		info->wakeup = of_property_read_bool(child, "wakeup-source");
  		i++;
  	}
