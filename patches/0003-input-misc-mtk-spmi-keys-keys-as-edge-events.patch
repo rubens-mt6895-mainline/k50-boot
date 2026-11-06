@@ -1,5 +1,5 @@
 diff --git a/drivers/input/misc/mtk-spmi-keys.c b/drivers/input/misc/mtk-spmi-keys.c
-index b52908c6f518..a33e40588b17 100644
+index b52908c6f518..4cda01518082 100644
 --- a/drivers/input/misc/mtk-spmi-keys.c
 +++ b/drivers/input/misc/mtk-spmi-keys.c
 @@ -26,6 +26,7 @@
@@ -38,7 +38,7 @@ index b52908c6f518..a33e40588b17 100644
  	unsigned int deb_reg;
  	bool wakeup;
  };
-@@ -56,10 +71,45 @@ struct mtk_keys {
+@@ -56,10 +71,43 @@ struct mtk_keys {
  	struct delayed_work poll_work;
  	struct mtk_keys_info keys[MTK_KEYS_MAX];
  	int num_keys;
@@ -69,8 +69,7 @@ index b52908c6f518..a33e40588b17 100644
 +
 +	for (i = 0; i < MTK_KEYS_SCAN_REGS; i++) {
 +		if (now[i] != keys->shadow[i]) {
-+			dev_info(keys->dev, "PMIC 0x%02x: 0x%02x -> 0x%02x
-+",
++			dev_info(keys->dev, "PMIC 0x%02x: 0x%02x -> 0x%02x\n",
 +				 MTK_KEYS_SCAN_BASE + i, keys->shadow[i], now[i]);
 +			keys->shadow[i] = now[i];
 +			changed++;
@@ -78,14 +77,13 @@ index b52908c6f518..a33e40588b17 100644
 +	}
 +
 +	if (changed)
-+		dev_info(keys->dev, "PMIC scan: %d register(s) changed
-+", changed);
++		dev_info(keys->dev, "PMIC scan: %d register(s) changed\n", changed);
 +}
 +
  static void mtk_keys_work(struct work_struct *work)
  {
  	struct mtk_keys *keys = container_of(work, struct mtk_keys,
-@@ -67,6 +117,9 @@ static void mtk_keys_work(struct work_struct *work)
+@@ -67,27 +115,55 @@ static void mtk_keys_work(struct work_struct *work)
  	u32 status;
  	int i, ret;
  
@@ -95,16 +93,17 @@ index b52908c6f518..a33e40588b17 100644
  	ret = regmap_read(keys->regmap, keys->keys[0].deb_reg, &status);
  	if (ret) {
  		dev_err(keys->dev, "failed to read key status: %d\n", ret);
-@@ -78,16 +131,45 @@ static void mtk_keys_work(struct work_struct *work)
+ 		goto reschedule;
+ 	}
+ 
++
+ 	if (status != keys->last_status) {
+-		dev_info(keys->dev, "TOPSTATUS = 0x%02x\n", status);
++		dev_info(keys->dev, "status 0x%02x -> 0x%02x (idle 0x%02x)\n",
++			 keys->last_status, status, keys->idle_status);
  		keys->last_status = status;
  	}
  
-+	if (status != keys->last_status) {
-+		dev_info(keys->dev, "status 0x%02x -> 0x%02x (idle 0x%02x)\n",
-+			 keys->last_status, status, keys->idle_status);
-+		keys->last_status = status;
-+	}
-+
  	for (i = 0; i < keys->num_keys; i++) {
 -		bool pressed;
 -
@@ -126,7 +125,7 @@ index b52908c6f518..a33e40588b17 100644
 +			keys->last_clear[i] = jiffies;
 +			keys->latched[i] = false;
 +			continue;
- 		}
++		}
 +
 +		if (keys->latched[i])
 +			continue;	/* 还咬着，不重复上报 */
@@ -137,7 +136,7 @@ index b52908c6f518..a33e40588b17 100644
 +				msecs_to_jiffies(MTK_KEYS_EDGE_GUARD_MS))) {
 +			keys->latched[i] = true;
 +			continue;
-+		}
+ 		}
 +
 +		keys->latched[i] = true;
 +		dev_info(keys->dev, "key %d (code %u) click, status 0x%02x\n",
@@ -149,7 +148,7 @@ index b52908c6f518..a33e40588b17 100644
  	}
  
  reschedule:
-@@ -100,8 +182,15 @@ static int mtk_keys_parse(struct mtk_keys *keys)
+@@ -100,8 +176,15 @@ static int mtk_keys_parse(struct mtk_keys *keys)
  	struct device *dev = keys->dev;
  	struct device_node *keys_np, *child;
  	struct mtk_keys_info *info;
@@ -165,7 +164,7 @@ index b52908c6f518..a33e40588b17 100644
  	/* As an MFD child, dev->of_node IS the "mediatek,mt6363-keys" node. */
  	keys_np = of_node_get(dev->of_node);
  	if (!keys_np) {
-@@ -128,6 +217,17 @@ static int mtk_keys_parse(struct mtk_keys *keys)
+@@ -128,6 +211,17 @@ static int mtk_keys_parse(struct mtk_keys *keys)
  		 * The stock rubens DT's child order is power then home. */
  		info->deb_reg = MT6363_REG_TOPSTATUS;
  		info->deb_mask = (i == 0) ? BIT(1) : BIT(3);
