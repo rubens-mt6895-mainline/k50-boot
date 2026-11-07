@@ -1,0 +1,15 @@
+diff --git a/drivers/input/misc/mtk-spmi-keys.c b/drivers/input/misc/mtk-spmi-keys.c
+index f1301d033f93..1157aa993dd2 100644
+--- a/drivers/input/misc/mtk-spmi-keys.c
++++ b/drivers/input/misc/mtk-spmi-keys.c
+@@ -48,8 +48,8 @@
+  * 这里用"锁定边沿 + 两次已上报点击之间至少隔这么久"。
+  */
+ #define MTK_KEYS_EDGE_GUARD_MS	300
+-#define MTK_KEYS_REPEAT_DELAY_MS	400	/* 按住多久开始连发 */
+-#define MTK_KEYS_REPEAT_MS	200	/* 连发间隔，对齐 mtk-kpd 的长按连发 */
++#define MTK_KEYS_REPEAT_DELAY_MS	500	/* 按住多久开始连发 */
++#define MTK_KEYS_REPEAT_MS	20	/* 连发间隔，对齐 mtk-kpd 的长按连发 */
+ 
+ static const struct regmap_config mtk_keys_regmap_config = {
+ 	.reg_bits	= 16,
