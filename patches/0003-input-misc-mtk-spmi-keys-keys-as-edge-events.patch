@@ -1,5 +1,5 @@
 diff --git a/drivers/input/misc/mtk-spmi-keys.c b/drivers/input/misc/mtk-spmi-keys.c
-index b52908c6f518..4cda01518082 100644
+index b52908c6f518..c48e2c4bea92 100644
 --- a/drivers/input/misc/mtk-spmi-keys.c
 +++ b/drivers/input/misc/mtk-spmi-keys.c
 @@ -26,6 +26,7 @@
@@ -23,7 +23,7 @@ index b52908c6f518..4cda01518082 100644
 + * TOPSTATUS 的按键位是自清零/粘滞的：边沿之后约 185 ms 可能被 PMIC 自己
 + * 清掉（按着也清），也可能一直粘着不落。所以既不能把电平当"按住"，
 + * 也不能每读到一次置起就报一次（那样会 5 Hz 刷点击）。
-+ * 这里用"锁定边沿 + 落下后至少稳定这么久才算新的一次点击"。
++ * 这里用"锁定边沿 + 两次已上报点击之间至少隔这么久"。
 + */
 +#define MTK_KEYS_EDGE_GUARD_MS	300
  
@@ -45,8 +45,8 @@ index b52908c6f518..4cda01518082 100644
 -	bool key_pressed[MTK_KEYS_MAX];
 +	/* 边沿锁定：raw 为真且上一次为假才算一次点击，按住不会重复上报 */
 +	bool latched[MTK_KEYS_MAX];
-+	/* 位落下去的稳定时刻，用来给下一次点击做守卫 */
-+	unsigned long last_clear[MTK_KEYS_MAX];
++	/* 上一次已上报点击的时刻，只用来给重复触发限速 */
++	unsigned long last_report[MTK_KEYS_MAX];
  	u32 last_status;
 +	u32 idle_status;
 +	u8 shadow[MTK_KEYS_SCAN_REGS];
@@ -83,7 +83,7 @@ index b52908c6f518..4cda01518082 100644
  static void mtk_keys_work(struct work_struct *work)
  {
  	struct mtk_keys *keys = container_of(work, struct mtk_keys,
-@@ -67,27 +115,55 @@ static void mtk_keys_work(struct work_struct *work)
+@@ -67,27 +115,56 @@ static void mtk_keys_work(struct work_struct *work)
  	u32 status;
  	int i, ret;
  
@@ -121,22 +121,23 @@ index b52908c6f518..4cda01518082 100644
 +			: !!(status & keys->keys[i].deb_mask);
 +
 +		if (!raw) {
-+			/* 落下：从这个时刻起算守卫 */
-+			keys->last_clear[i] = jiffies;
++			/* 抬起：解除咬合；守卫计时不在这里刷新 */
 +			keys->latched[i] = false;
 +			continue;
-+		}
+ 		}
 +
 +		if (keys->latched[i])
 +			continue;	/* 还咬着，不重复上报 */
 +
-+		/* 刚落下来就又被置起（自清零抖动）视为同一次点击 */
-+		if (keys->last_clear[i] &&
-+		    time_before(jiffies, keys->last_clear[i] +
++		/* 只给「同一次点击被自清零拆成两次」限速：基准是上一次已
++		 * 上报的点击，而不是每轮 30 ms 的释放采样，否则按下永远
++		 * 落在窗口里被吞掉（实测整个 boot 一次都不报）。 */
++		if (keys->last_report[i] &&
++		    time_before(jiffies, keys->last_report[i] +
 +				msecs_to_jiffies(MTK_KEYS_EDGE_GUARD_MS))) {
 +			keys->latched[i] = true;
 +			continue;
- 		}
++		}
 +
 +		keys->latched[i] = true;
 +		dev_info(keys->dev, "key %d (code %u) click, status 0x%02x\n",
@@ -148,7 +149,7 @@ index b52908c6f518..4cda01518082 100644
  	}
  
  reschedule:
-@@ -100,8 +176,15 @@ static int mtk_keys_parse(struct mtk_keys *keys)
+@@ -100,8 +177,15 @@ static int mtk_keys_parse(struct mtk_keys *keys)
  	struct device *dev = keys->dev;
  	struct device_node *keys_np, *child;
  	struct mtk_keys_info *info;
@@ -164,7 +165,7 @@ index b52908c6f518..4cda01518082 100644
  	/* As an MFD child, dev->of_node IS the "mediatek,mt6363-keys" node. */
  	keys_np = of_node_get(dev->of_node);
  	if (!keys_np) {
-@@ -128,6 +211,17 @@ static int mtk_keys_parse(struct mtk_keys *keys)
+@@ -128,6 +212,17 @@ static int mtk_keys_parse(struct mtk_keys *keys)
  		 * The stock rubens DT's child order is power then home. */
  		info->deb_reg = MT6363_REG_TOPSTATUS;
  		info->deb_mask = (i == 0) ? BIT(1) : BIT(3);
